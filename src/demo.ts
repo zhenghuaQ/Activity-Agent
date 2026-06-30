@@ -24,6 +24,7 @@ import type {
   FollowUpQuestion,
   FollowUpAnswer,
   PlanningState,
+  Restaurant,
 } from "../spec/types.js";
 import { LeadRoleStrategy } from "../spec/types.js";
 import { DimensionLabel, ObjectiveLabel } from "../spec/decision.js";
@@ -83,7 +84,7 @@ function showPlanBriefly(plan: Plan): string[] {
     const price = act.place.pricePerPerson ? ` ¥${act.place.pricePerPerson}/人` : "";
     const queue =
       act.place.type === "restaurant"
-        ? `  [排队${(act.place as any).queueCount ?? 0}人]`
+        ? `  [排队${(act.place as Restaurant).queueCount ?? 0}人]`
         : "";
 
     lines.push(
@@ -232,7 +233,7 @@ function buildPatches(
     if (value === "cheat_day") return { dietaryRestrictions: [] };
   }
   if (q.id === "budget") {
-    return { budget: value as any };
+    return { budget: value as "low" | "medium" | "high" };
   }
   return {};
 }

@@ -10,6 +10,7 @@ import type {
   CongestionLevel,
 } from "../../spec/transit.js";
 import { mockEstimateTransit } from "../../spec/transit.js";
+import type { AmapDrivingResponse } from "../../spec/tool-data.js";
 import { childLogger } from "../core/logger.js";
 
 const log = childLogger("transit:amap");
@@ -43,7 +44,7 @@ export async function estimateTransitWithAmap(
     url.searchParams.set("extensions", "all");
 
     const resp = await fetch(url.toString());
-    const json = await resp.json() as any;
+    const json: AmapDrivingResponse = await resp.json();
 
     if (json.status !== "1" || !json.route?.paths?.length) {
       log.warn({ status: json.status }, "高德返回异常，降级 Mock 通勤");
@@ -56,9 +57,9 @@ export async function estimateTransitWithAmap(
 
     let congestionLevel: CongestionLevel = "smooth";
     const steps = path.steps || [];
-    const slowSteps = steps.filter((s: any) => {
+    const slowSteps = steps.filter((s) => {
       const tmcs = s.tmcs || [];
-      return tmcs.some((t: any) => t.status && t.status !== "0");
+      return tmcs.some((t) => t.status && t.status !== "0");
     });
     if (slowSteps.length > steps.length * 0.5) congestionLevel = "congested";
     else if (slowSteps.length > 0) congestionLevel = "slow";

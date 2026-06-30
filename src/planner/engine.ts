@@ -24,8 +24,13 @@ import type {
   Restaurant,
   StructuredConstraints,
 } from "../../spec/types.js";
-import { calcFeasibilityScore, rankCandidates } from "../../spec/constraints.js";
+import { calcFeasibilityScore, rankCandidates } from "../decision/feasibility.js";
 import { LeadRoleStrategy } from "../../spec/types.js";
+import type {
+  FollowUpResult,
+  AttractionAvailabilityResult,
+  RestaurantAvailabilityResult,
+} from "../../spec/tool-data.js";
 import { toolRegistry } from "../tools/registry.js";
 import { parseIntentWithLLM } from "../llm/intent.js";
 import { DELIVERY_ITEMS } from "../data/mock.js";
@@ -64,7 +69,9 @@ export async function stage2_followUp(
   state: PlanningState,
   answers?: FollowUpAnswer[]
 ): Promise<PlanningState> {
-  if (!state.constraints) throw new Error("需要先执行 Stage 1");
+  if (!state.constraints) {
+    return { ...state, stage: "follow_up_questions", errors: ["需要先执行 Stage 1"] };
+  }
 
   // 应用回答修正约束
   let constraints = state.constraints;
@@ -87,16 +94,30 @@ export async function stage2_followUp(
 
   // 生成追问
   const followUpTool = toolRegistry.get("generate_followup_questions");
-  if (!followUpTool) throw new Error("generate_followup_questions tool 未注册");
+  if (!followUpTool) {
+    return {
+      ...state,
+      stage: "follow_up_questions",
+      constraints,
+      errors: ["generate_followup_questions tool 未注册"],
+    };
+  }
 
   const result = await followUpTool.execute({ constraints });
-  if (result.status === "failed") throw new Error(`追问生成失败: ${result.error}`);
+  if (result.status === "failed") {
+    return {
+      ...state,
+      stage: "follow_up_questions",
+      constraints,
+      errors: [`追问生成失败: ${result.error}`],
+    };
+  }
 
   return {
     ...state,
     stage: "follow_up_questions",
     constraints,
-    followUpQuestions: (result as any).data,
+    followUpQuestions: result.data as FollowUpResult,
   };
 }
 
@@ -125,7 +146,9 @@ function applyFollowUpPatch(
 export async function stage3_generateCandidates(
   state: PlanningState
 ): Promise<PlanningState> {
-  if (!state.constraints) throw new Error("需要先执行 Stage 1");
+  if (!state.constraints) {
+    return { ...state, stage: "candidate_generation", errors: ["需要先执行 Stage 1"] };
+  }
 
   const { group, timeWindow, distance } = state.constraints;
   const leadRole = group.leadRole;
@@ -138,7 +161,11 @@ export async function stage3_generateCandidates(
   const breakTool = toolRegistry.get("search_break_places");
 
   if (!attractionTool || !restaurantTool || !breakTool) {
-    throw new Error("Tool 未注册");
+    return {
+      ...state,
+      stage: "candidate_generation",
+      errors: ["Tool 未注册"],
+    };
   }
 
   // 分级兜底：候选不足时自动扩检索半径（L1）
@@ -278,7 +305,9 @@ export async function stage4_feasibilityCheck(
   const availabilityTool = toolRegistry.get("check_attraction_availability");
   const restAvailTool = toolRegistry.get("check_restaurant_availability");
 
-  if (!availabilityTool || !restAvailTool) throw new Error("校验Tool未注册");
+  if (!availabilityTool || !restAvailTool) {
+    return { ...state, stage: "feasibility_check", errors: ["校验Tool未注册"] };
+  }
 
   const { group } = state.constraints!;
   const validCandidates: PlanCandidate[] = [];
@@ -293,7 +322,7 @@ export async function stage4_feasibilityCheck(
           attractionId: act.place.id,
           arrivalTime: act.scheduledStart,
         });
-        if (res.status !== "failed" && !(res as any).data.available) {
+        if (res.status !== "failed" && !(res.data as AttractionAvailabilityResult).available) {
           allOk = false;
         }
       }
@@ -304,7 +333,7 @@ export async function stage4_feasibilityCheck(
           diningTime: act.scheduledStart,
           partySize: group.totalPeople,
         });
-        if (res.status !== "failed" && (res as any).data.estimatedWaitMinutes > 30) {
+        if (res.status !== "failed" && (res.data as RestaurantAvailabilityResult).estimatedWaitMinutes > 30) {
           allOk = false;
         }
       }
@@ -440,6 +469,7 @@ export async function runFullPipeline(
 
     return { success: false, state, message: "未能生成可行方案" };
   } catch (err) {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, "规划管线异常");
     return {
       success: false,
       state,
@@ -522,6 +552,7 @@ export async function runFullPipelineStreaming(
     if (state.selectedPlan) return { success: true, state, message: "方案规划完成" };
     return { success: false, state, message: "未能生成可行方案" };
   } catch (err) {
+    log.error({ err: err instanceof Error ? err.message : String(err) }, "规划管线异常");
     return {
       success: false,
       state,

@@ -92,13 +92,13 @@ export async function generateFollowUpWithLLM(
       max_tokens: 600,
     });
 
-    const toolCall = (resp.choices[0]?.message?.tool_calls?.[0] as any);
-    if (!toolCall) {
+    const toolCall = resp.choices[0]?.message?.tool_calls?.[0];
+    if (!toolCall || toolCall.type !== "function") {
       return { status: "degraded", data: [], trace: { toolName: "generate_followup_questions", input: "no_tool_call", timestamp: t0, latencyMs: Date.now() - t0, output: null }, reason: "LLM returned no tool call" };
     }
 
     const parsed = JSON.parse(toolCall.function.arguments);
-    const questions: FollowUpQuestion[] = (parsed.questions || []).map((q: any) => ({
+    const questions: FollowUpQuestion[] = (parsed.questions || []).map((q: Record<string, unknown>) => ({
       ...q,
       type: "single_choice" as const,
     }));

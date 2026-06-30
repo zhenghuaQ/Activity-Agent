@@ -9,6 +9,7 @@ import type {
   Scenario,
 } from "../../spec/types.js";
 import { getLLMClient, getLLMConfig } from "./config.js";
+import type OpenAI from "openai";
 import { HOME } from "../data/mock.js";
 import { parseIntent as mockParse } from "../intent/parser.js";
 import { childLogger } from "../core/logger.js";
@@ -160,8 +161,8 @@ export async function parseIntentWithLLM(rawText: string): Promise<StructuredCon
       max_tokens: 500,
     });
 
-    const toolCall = (resp.choices[0]?.message?.tool_calls?.[0] as any);
-    if (!toolCall) {
+    const toolCall = resp.choices[0]?.message?.tool_calls?.[0];
+    if (!toolCall || toolCall.type !== "function") {
       log.warn("LLM 未返回 function call，降级 Mock");
       return mockParse(rawText);
     }
