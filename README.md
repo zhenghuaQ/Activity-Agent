@@ -77,7 +77,7 @@ ai-activity-agent/
 ### 安装
 
 ```bash
-git clone https://github.com/your-username/ai-activity-agent.git
+git clone https://github.com/zhenghuaQ/meituan-activity-agent.git
 cd ai-activity-agent
 npm install
 ```
@@ -290,14 +290,13 @@ server {
 
 ## 技术栈
 
-- TypeScript + Node.js (tsx 运行时)
-- OpenAI function calling（兼容接口）
-- 设计范式：Specification-Driven Development + Harness Engineering
+- **语言**：TypeScript (strict mode)
+- **运行时**：Node.js (tsx)
+- **后端**：Fastify + OpenAI function calling + Pino
+- **前端**：React 18 + Vite + Recharts
+- **测试**：Vitest（13 文件 / 70 用例）
+- **设计范式**：Specification-Driven Development + Harness Engineering
 
 ## License
 
 MIT
-
-## 致谢
-
-本项目为算法竞赛参赛作品，模拟本地生活场景下的短时活动规划需求。
