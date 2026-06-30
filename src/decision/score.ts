@@ -12,20 +12,41 @@ import type {
   PlanScore,
   ScoringInput,
 } from "../../spec/decision.js";
-import { ALL_DIMENSIONS, normalizeWeights } from "../../spec/decision.js";
+import { ALL_DIMENSIONS } from "../../spec/decision.js";
+import { normalizeWeights } from "./weights.js";
 import { timeToMinutes } from "../../spec/constraints.js";
 import { predictCrowd } from "../data/crowd.js";
 import { getDataSource } from "../data/index.js";
 import type { CrowdPrediction } from "../../spec/datasource.js";
+import {
+  TIME_IDEAL_RATIO,
+  TIME_OVERFLOW_PENALTY_PER_PCT,
+  TIME_UNDER_BASE_SCORE,
+  TIME_UNDER_SCORE_MULTIPLIER,
+  TRANSIT_BASELINE_MINUTES,
+  PREF_BASE_SCORE,
+  PREF_CUISINE_HIT_BONUS,
+  PREF_DIET_HIT_BONUS,
+  PREF_RESTRICTION_BONUS,
+  PREF_LOCAL_FEATURE_BONUS,
+  CROWD_PENALTY,
+  CROWD_UNKNOWN_PENALTY,
+  CROWD_NO_DATA_SCORE,
+  BUDGET_TARGET,
+  BUDGET_UNDER_PENALTY_PER_PCT,
+  BUDGET_OVER_PENALTY_PER_PCT,
+  POPULARITY_MIN_RATING,
+  POPULARITY_RATING_RANGE,
+  CONFIDENCE_BASE,
+  CONFIDENCE_CROWD_WEIGHT,
+  CONFIDENCE_AMAP_BONUS,
+  CONFIDENCE_MOCK_BONUS,
+  CONFIDENCE_COMPLETE_BONUS,
+  SCORE_MIN,
+  SCORE_MAX,
+} from "./constants.js";
 
-const clamp = (v: number, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v));
-
-/** 预算档对应的人均参考上限（元） */
-const BUDGET_TARGET: Record<"low" | "medium" | "high", number> = {
-  low: 120,
-  medium: 280,
-  high: 600,
-};
+const clamp = (v: number, lo = SCORE_MIN, hi = SCORE_MAX) => Math.max(lo, Math.min(hi, v));
 
 interface DimResult {
   score: number;
@@ -44,8 +65,8 @@ function scoreTime(input: ScoringInput): DimResult {
   const u = span / available;
 
   let score: number;
-  if (u > 1) score = clamp(100 - (u - 1) * 150);
-  else score = clamp(40 + (u / 0.85) * 60);
+  if (u > 1) score = clamp(SCORE_MAX - (u - 1) * TIME_OVERFLOW_PENALTY_PER_PCT * 100);
+  else score = clamp(TIME_UNDER_BASE_SCORE + (u / TIME_IDEAL_RATIO) * TIME_UNDER_SCORE_MULTIPLIER);
 
   return {
     score,
@@ -55,7 +76,7 @@ function scoreTime(input: ScoringInput): DimResult {
 
 function scoreTransit(input: ScoringInput): DimResult {
   const total = input.plan.totalTransitMinutes;
-  const score = clamp(100 - (total / 90) * 100);
+  const score = clamp(SCORE_MAX - (total / TRANSIT_BASELINE_MINUTES) * 100);
   return { score, reason: `总通勤 ${total} 分钟` };
 }
 
@@ -65,27 +86,27 @@ function scorePreference(input: ScoringInput): DimResult {
     .map((a) => a.place)
     .filter((p): p is Restaurant => p.type === "restaurant");
 
-  let score = 60;
+  let score = PREF_BASE_SCORE;
   const hits: string[] = [];
 
   for (const r of restaurants) {
     if (prefs.preferredCuisine?.some((c) => r.cuisine.includes(c) || c.includes(r.cuisine))) {
-      score += 15;
+      score += PREF_CUISINE_HIT_BONUS;
       hits.push(`命中偏好菜系「${r.cuisine}」`);
     }
     if (prefs.dieting && r.tags.some((t) => ["轻食", "低卡", "健康餐", "少油盐", "清淡"].includes(t))) {
-      score += 12;
+      score += PREF_DIET_HIT_BONUS;
       hits.push("满足轻食/减脂");
     }
     if (prefs.dietaryRestrictions.length > 0 && r.dietaryOptions) {
-      score += 8;
+      score += PREF_RESTRICTION_BONUS;
       hits.push("支持忌口定制");
     }
   }
 
   const hasLocalFeature = input.plan.activities.some((a) => a.place.localFeatures.length > 0);
   if (hasLocalFeature) {
-    score += 10;
+    score += PREF_LOCAL_FEATURE_BONUS;
     hits.push("含当地特色");
   }
 
@@ -96,13 +117,13 @@ function scorePreference(input: ScoringInput): DimResult {
 }
 
 function scoreCrowd(input: ScoringInput, crowds: CrowdPrediction[]): DimResult {
-  if (crowds.length === 0) return { score: 70, reason: "无拥挤度数据" };
-  const penalty: Record<string, number> = { low: 0, medium: 15, high: 35, packed: 55 };
+  if (crowds.length === 0) return { score: CROWD_NO_DATA_SCORE, reason: "无拥挤度数据" };
+  const penalty = CROWD_PENALTY;
   const avg =
-    crowds.reduce((s, c) => s + (penalty[c.level] ?? 20), 0) / crowds.length;
+    crowds.reduce((s, c) => s + (penalty[c.level] ?? CROWD_UNKNOWN_PENALTY), 0) / crowds.length;
   const worst = crowds.reduce((w, c) => (penalty[c.level] > penalty[w.level] ? c : w));
   return {
-    score: clamp(100 - avg),
+    score: clamp(SCORE_MAX - avg),
     reason: `平均客流${avg <= 10 ? "平稳" : avg <= 25 ? "适中" : "偏高"}，最挤：${worst.factors[0] ?? "常规"}`,
   };
 }
@@ -117,8 +138,8 @@ function scoreBudget(input: ScoringInput): DimResult {
   const ratio = perPerson / target;
 
   let score: number;
-  if (ratio <= 1) score = clamp(100 - ratio * 18); // 越省略好，但留 18 分弹性
-  else score = clamp(100 - (ratio - 1) * 120);
+  if (ratio <= 1) score = clamp(SCORE_MAX - ratio * BUDGET_UNDER_PENALTY_PER_PCT * 100);
+  else score = clamp(SCORE_MAX - (ratio - 1) * BUDGET_OVER_PENALTY_PER_PCT * 100);
 
   return {
     score,
@@ -130,7 +151,7 @@ function scorePopularity(input: ScoringInput): DimResult {
   const places = input.plan.activities.map((a) => a.place);
   if (places.length === 0) return { score: 0, reason: "无地点" };
   const avg = places.reduce((s, p) => s + p.rating, 0) / places.length;
-  const score = clamp(((avg - 3) / 2) * 100);
+  const score = clamp(((avg - POPULARITY_MIN_RATING) / POPULARITY_RATING_RANGE) * 100);
   return { score, reason: `平均口碑 ${avg.toFixed(1)} 分` };
 }
 
@@ -181,7 +202,12 @@ export function scorePlan(input: ScoringInput): PlanScore {
   const complete = input.plan.activities.every((a) => a.transitTo !== undefined);
   const confidence = Math.max(
     0,
-    Math.min(1, 0.5 + 0.25 * avgCrowdConf + (usingAmap ? 0.15 : 0.05) + (complete ? 0.1 : 0))
+    Math.min(1,
+      CONFIDENCE_BASE
+      + CONFIDENCE_CROWD_WEIGHT * avgCrowdConf
+      + (usingAmap ? CONFIDENCE_AMAP_BONUS : CONFIDENCE_MOCK_BONUS)
+      + (complete ? CONFIDENCE_COMPLETE_BONUS : 0)
+    )
   );
 
   return { total, dimensions, confidence: Math.round(confidence * 100) / 100 };

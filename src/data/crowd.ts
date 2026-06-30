@@ -8,6 +8,25 @@
 
 import type { Place, Restaurant } from "../../spec/types.js";
 import type { CrowdLevel, CrowdPrediction } from "../../spec/datasource.js";
+import {
+  HEAT_RATING_MIN,
+  HEAT_RATING_RANGE,
+  HEAT_BASE_WEIGHT,
+  CHECKIN_BONUS,
+  MEAL_PEAK_BONUS,
+  LEISURE_PEAK_BONUS,
+  WEEKEND_BONUS,
+  CROWD_LEVEL_THRESHOLDS,
+  EST_WAIT_RESTAURANT_FACTOR,
+  EST_WAIT_NON_RESTAURANT_FACTOR,
+  QUEUE_MINUTES_PER_TABLE,
+  QUEUE_PEAK_MULTIPLIER,
+  QUEUE_TO_SCORE_DIVISOR,
+  QUEUE_TO_SCORE_CAP,
+  CONFIDENCE_HEURISTIC,
+  CONFIDENCE_WITH_QUEUE,
+  HIGH_RATING_THRESHOLD,
+} from "./crowd-constants.js";
 
 export interface CrowdContext {
   /** 到达时间 "HH:mm" */
@@ -32,9 +51,9 @@ function isLeisurePeak(hour: number, isWeekend: boolean): boolean {
 }
 
 function levelFromScore(score: number): CrowdLevel {
-  if (score >= 0.8) return "packed";
-  if (score >= 0.55) return "high";
-  if (score >= 0.3) return "medium";
+  for (const t of CROWD_LEVEL_THRESHOLDS) {
+    if (score >= t.min) return t.level;
+  }
   return "low";
 }
 
@@ -49,51 +68,49 @@ export function predictCrowd(place: Place, ctx: CrowdContext): CrowdPrediction {
   const factors: string[] = [];
 
   // 基础热度：评分越高、网红打卡地越挤
-  let score = Math.max(0, Math.min(1, (place.rating - 3.5) / 1.5)) * 0.35;
-  if (place.rating >= 4.6) factors.push("高人气场所");
+  let score = Math.max(0, Math.min(1, (place.rating - HEAT_RATING_MIN) / HEAT_RATING_RANGE)) * HEAT_BASE_WEIGHT;
+  if (place.rating >= HIGH_RATING_THRESHOLD) factors.push("高人气场所");
   if (place.localFeatures.includes("popular_checkin")) {
-    score += 0.15;
+    score += CHECKIN_BONUS;
     factors.push("网红打卡地");
   }
 
   // 时段峰值
   if (place.type === "restaurant" && isMealPeak(hour)) {
-    score += 0.3;
+    score += MEAL_PEAK_BONUS;
     factors.push("用餐高峰时段");
   }
   if (
     (place.type === "attraction" || place.type === "break") &&
     isLeisurePeak(hour, ctx.isWeekend)
   ) {
-    score += 0.25;
+    score += LEISURE_PEAK_BONUS;
     factors.push("周末午后客流高峰");
   }
 
   // 周末整体加成
   if (ctx.isWeekend) {
-    score += 0.1;
+    score += WEEKEND_BONUS;
     factors.push("周末");
   }
 
   // 置信度：纯启发式偏低，有真实排队数则提升
-  let confidence = 0.55;
+  let confidence = CONFIDENCE_HEURISTIC;
   let estimatedWaitMinutes: number;
 
   if (place.type === "restaurant") {
     const r = place as Restaurant;
     if (r.hasQueue && typeof r.queueCount === "number") {
-      // 真实排队人数 → 校准等待，并按峰值放大
-      const peakMultiplier = isMealPeak(hour) ? 1.4 : 1;
-      estimatedWaitMinutes = Math.round(r.queueCount * 5 * peakMultiplier);
-      confidence = 0.78;
+      const peakMultiplier = isMealPeak(hour) ? QUEUE_PEAK_MULTIPLIER : 1;
+      estimatedWaitMinutes = Math.round(r.queueCount * QUEUE_MINUTES_PER_TABLE * peakMultiplier);
+      confidence = CONFIDENCE_WITH_QUEUE;
       factors.push(`实时排队约 ${r.queueCount} 桌`);
-      // 用真实排队微调拥挤分
-      score = Math.min(1, score + Math.min(0.3, r.queueCount / 40));
+      score = Math.min(1, score + Math.min(QUEUE_TO_SCORE_CAP, r.queueCount / QUEUE_TO_SCORE_DIVISOR));
     } else {
-      estimatedWaitMinutes = Math.round(score * 30);
+      estimatedWaitMinutes = Math.round(score * EST_WAIT_RESTAURANT_FACTOR);
     }
   } else {
-    estimatedWaitMinutes = Math.round(score * 25);
+    estimatedWaitMinutes = Math.round(score * EST_WAIT_NON_RESTAURANT_FACTOR);
   }
 
   score = Math.max(0, Math.min(1, score));
