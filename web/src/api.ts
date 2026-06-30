@@ -68,7 +68,7 @@ export function streamDecide(
     try {
       handlers.onStage(JSON.parse((ev as MessageEvent).data));
     } catch {
-      /* ignore malformed */
+      console.warn("Failed to parse SSE stage event");
     }
   });
 
@@ -76,7 +76,7 @@ export function streamDecide(
     try {
       handlers.onDone(JSON.parse((ev as MessageEvent).data));
     } catch {
-      /* ignore malformed */
+      console.warn("Failed to parse SSE stage event");
     }
     es.close();
   });

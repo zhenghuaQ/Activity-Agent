@@ -25,6 +25,7 @@ import { metrics } from "./metrics.js";
 import { getRuntimeFlags, setRuntimeFlags, type RuntimeFlags } from "./flags.js";
 import { checkRateLimit } from "./ratelimit.js";
 import { getOpenApiSpec } from "./openapi.js";
+import { SWAGGER_HTML } from "./swagger-html.js";
 
 const VERSION = process.env.npm_package_version || "1.0.0";
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 120);
@@ -231,21 +232,3 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
 
   return app;
 }
-
-const SWAGGER_HTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <title>AI出行决策 API 文档</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
-</head>
-<body>
-  <div id="swagger"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.onload = () => {
-      window.ui = SwaggerUIBundle({ url: "/openapi.json", dom_id: "#swagger" });
-    };
-  </script>
-</body>
-</html>`;

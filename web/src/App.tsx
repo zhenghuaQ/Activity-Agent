@@ -21,8 +21,8 @@ export default function App() {
   useEffect(() => {
     listSegments()
       .then(setSegments)
-      .catch(() => {
-        /* 后端未启动时静默，监控页会提示 */
+      .catch((err: unknown) => {
+        console.warn("Failed to load segments, backend may be down:", err instanceof Error ? err.message : err);
       });
   }, []);
 
