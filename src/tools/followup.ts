@@ -6,6 +6,7 @@
 import type { FollowUpQuestion, LeadRole, StructuredConstraints } from "../../spec/types.js";
 import { LeadRoleStrategy } from "../../spec/types.js";
 import type * as T from "../../spec/tools.js";
+import { GENERATE_FOLLOWUP_TOOL } from "../../spec/tools.js";
 import { BaseTool } from "./base.js";
 import { generateFollowUpWithLLM } from "../llm/followup.js";
 
@@ -14,6 +15,8 @@ export class GenerateFollowUpTool extends BaseTool<
   T.GenerateFollowUpOutput
 > {
   name = "generate_followup_questions";
+  description = GENERATE_FOLLOWUP_TOOL.description;
+  inputSchema = GENERATE_FOLLOWUP_TOOL.inputSchema;
 
   async run(input: T.GenerateFollowUpInput): Promise<FollowUpQuestion[]> {
     const { group } = input.constraints;
@@ -21,10 +24,10 @@ export class GenerateFollowUpTool extends BaseTool<
 
     if (!strategy.needsFollowUp) return [];
 
-    // 尝试 LLM 生成
+    // 尝试 LLM 生成；未配置/失败时返回 []，降级为硬编码追问
     const llmResult = await generateFollowUpWithLLM(input.constraints);
-    if (llmResult.status === "ok" && llmResult.data.length > 0) {
-      return llmResult.data;
+    if (llmResult.length > 0) {
+      return llmResult;
     }
 
     // 降级为硬编码追问

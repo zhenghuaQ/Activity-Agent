@@ -3,3 +3,5 @@ export * from "./types.js";
 export * from "./tools.js";
 export * from "./constraints.js";
 export * from "./transit.js";
+export * from "./errors.js";
+export * from "./tool-response.js";

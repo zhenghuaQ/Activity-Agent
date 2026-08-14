@@ -7,7 +7,12 @@
 
 import type { Restaurant } from "../../spec/types.js";
 import type * as T from "../../spec/tools.js";
+import {
+  SEARCH_RESTAURANTS_TOOL,
+  CHECK_RESTAURANT_AVAILABILITY_TOOL,
+} from "../../spec/tools.js";
 import { BaseTool } from "./base.js";
+import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
 
@@ -18,6 +23,8 @@ export class SearchRestaurantsTool extends BaseTool<
   T.SearchRestaurantsOutput
 > {
   name = "search_restaurants";
+  description = SEARCH_RESTAURANTS_TOOL.description;
+  inputSchema = SEARCH_RESTAURANTS_TOOL.inputSchema;
 
   async run(input: T.SearchRestaurantsInput): Promise<Restaurant[]> {
     const ds = getDataSource();
@@ -73,12 +80,14 @@ export class CheckRestaurantAvailabilityTool extends BaseTool<
   T.CheckRestaurantAvailabilityOutput
 > {
   name = "check_restaurant_availability";
+  description = CHECK_RESTAURANT_AVAILABILITY_TOOL.description;
+  inputSchema = CHECK_RESTAURANT_AVAILABILITY_TOOL.inputSchema;
 
   async run(
     input: T.CheckRestaurantAvailabilityInput
   ): Promise<T.RestaurantAvailability> {
     const rest = await getDataSource().getRestaurantById(input.restaurantId);
-    if (!rest) throw new Error(`餐厅 ${input.restaurantId} 不存在`);
+    if (!rest) throw new ToolError("E_RESOURCE_NOT_FOUND", `餐厅 ${input.restaurantId} 不存在`);
 
     // 拥挤度启发式：综合时段/热度/真实排队数预测等待
     const crowd = predictCrowd(rest, { arrivalTime: input.diningTime, isWeekend: false });

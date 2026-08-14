@@ -309,23 +309,9 @@ export interface PlanCandidate {
 }
 
 // ─── Trace（可观测性） ─────────────────────────────────
-
-/** 单次Tool调用记录 */
-export interface ToolTrace {
-  toolName: string;
-  input: unknown;
-  output: unknown;
-  latencyMs: number;
-  timestamp: number;
-}
-
-// ─── 判别式联合结果 ────────────────────────────────────
-
-/** 所有Tool返回的统一结果类型 */
-export type ToolResult<T> =
-  | { status: "ok"; data: T; trace: ToolTrace }
-  | { status: "degraded"; data: T; reason: string; trace: ToolTrace }
-  | { status: "failed"; error: string; trace: ToolTrace };
+//
+// 已迁移：工具调用统计统一由 spec/tool-response.ts 的
+// ToolResponse（stats + context）承载，原 ToolTrace/ToolResult 已移除。
 
 /** 规划阶段（终点为「决策输出」，不含下单确认） */
 export type PlanningStage =

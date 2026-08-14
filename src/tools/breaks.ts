@@ -7,6 +7,7 @@
 
 import type { BreakPlace } from "../../spec/types.js";
 import type * as T from "../../spec/tools.js";
+import { SEARCH_BREAK_PLACES_TOOL } from "../../spec/tools.js";
 import { BaseTool } from "./base.js";
 import { getDataSource } from "../data/index.js";
 
@@ -15,6 +16,8 @@ export class SearchBreakPlacesTool extends BaseTool<
   T.SearchBreakPlacesOutput
 > {
   name = "search_break_places";
+  description = SEARCH_BREAK_PLACES_TOOL.description;
+  inputSchema = SEARCH_BREAK_PLACES_TOOL.inputSchema;
 
   async run(input: T.SearchBreakPlacesInput): Promise<BreakPlace[]> {
     const ds = getDataSource();

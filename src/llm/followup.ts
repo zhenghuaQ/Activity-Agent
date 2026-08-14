@@ -1,11 +1,12 @@
 // ============================================================
 // src/llm/followup.ts — LLM 追问生成（OpenAI 兼容接口）
-// 替代 src/tools/followup.ts 中的硬编码模板
+//
+// 内部辅助函数（非 Tool）：未配置/失败/无工具调用均返回 []，
+// 由调用方降级到硬编码模板追问。
 // ============================================================
 
 import type { FollowUpQuestion, StructuredConstraints } from "../../spec/types.js";
 import { getLLMClient, getLLMConfig } from "./config.js";
-import type { ToolResult } from "../../spec/types.js";
 import { childLogger } from "../core/logger.js";
 
 const log = childLogger("llm:followup");
@@ -48,20 +49,14 @@ const FOLLOWUP_SCHEMA = {
 
 export async function generateFollowUpWithLLM(
   constraints: StructuredConstraints
-): Promise<ToolResult<FollowUpQuestion[]>> {
+): Promise<FollowUpQuestion[]> {
   const client = getLLMClient();
   const config = getLLMConfig();
 
   if (!client || !config.enabled) {
-    return {
-      status: "degraded",
-      data: [],
-      trace: { toolName: "generate_followup_questions", input: "llm_disabled", timestamp: Date.now(), latencyMs: 0, output: null },
-      reason: "LLM not configured, skipping follow-up",
-    };
+    return [];
   }
 
-  const t0 = Date.now();
   try {
     log.info("生成追问中");
     const { group } = constraints;
@@ -94,28 +89,22 @@ export async function generateFollowUpWithLLM(
 
     const toolCall = resp.choices[0]?.message?.tool_calls?.[0];
     if (!toolCall || toolCall.type !== "function") {
-      return { status: "degraded", data: [], trace: { toolName: "generate_followup_questions", input: "no_tool_call", timestamp: t0, latencyMs: Date.now() - t0, output: null }, reason: "LLM returned no tool call" };
+      log.warn("LLM 未返回 tool call，使用模板追问");
+      return [];
     }
 
     const parsed = JSON.parse(toolCall.function.arguments);
-    const questions: FollowUpQuestion[] = (parsed.questions || []).map((q: Record<string, unknown>) => ({
-      ...q,
-      type: "single_choice" as const,
-    }));
+    const questions: FollowUpQuestion[] = (parsed.questions || []).map(
+      (q: Record<string, unknown>) => ({
+        ...q,
+        type: "single_choice" as const,
+      })
+    );
 
     log.info({ count: questions.length }, "追问生成完成");
-    return {
-      status: "ok",
-      data: questions,
-      trace: { toolName: "generate_followup_questions", input: `followup_for_${group.leadRole}`, timestamp: t0, latencyMs: Date.now() - t0, output: null },
-    };
+    return questions;
   } catch (err) {
-    // Silently fallback
-    return {
-      status: "degraded",
-      data: [],
-      trace: { toolName: "generate_followup_questions", input: "error", timestamp: t0, latencyMs: Date.now() - t0, output: null },
-      reason: "Follow-up generation failed: " + (err instanceof Error ? err.message : String(err)),
-    };
+    log.warn({ err: err instanceof Error ? err.message : String(err) }, "追问生成失败，使用模板");
+    return [];
   }
 }

@@ -7,7 +7,12 @@
 
 import type { Attraction } from "../../spec/types.js";
 import type * as T from "../../spec/tools.js";
+import {
+  SEARCH_ATTRACTIONS_TOOL,
+  CHECK_ATTRACTION_AVAILABILITY_TOOL,
+} from "../../spec/tools.js";
 import { BaseTool } from "./base.js";
+import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
 
@@ -18,6 +23,8 @@ export class SearchAttractionsTool extends BaseTool<
   T.SearchAttractionsOutput
 > {
   name = "search_attractions";
+  description = SEARCH_ATTRACTIONS_TOOL.description;
+  inputSchema = SEARCH_ATTRACTIONS_TOOL.inputSchema;
 
   async run(input: T.SearchAttractionsInput): Promise<Attraction[]> {
     const ds = getDataSource();
@@ -49,11 +56,13 @@ export class CheckAttractionAvailabilityTool extends BaseTool<
   T.CheckAttractionAvailabilityOutput
 > {
   name = "check_attraction_availability";
+  description = CHECK_ATTRACTION_AVAILABILITY_TOOL.description;
+  inputSchema = CHECK_ATTRACTION_AVAILABILITY_TOOL.inputSchema;
 
   async run(input: T.CheckAttractionAvailabilityInput): Promise<T.AttractionAvailability> {
     const attr = await getDataSource().getAttractionById(input.attractionId);
     if (!attr) {
-      throw new Error(`景点 ${input.attractionId} 不存在`);
+      throw new ToolError("E_RESOURCE_NOT_FOUND", `景点 ${input.attractionId} 不存在`);
     }
 
     const slot = attr.availableSlots.find((s) => {

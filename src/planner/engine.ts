@@ -26,11 +26,6 @@ import type {
 } from "../../spec/types.js";
 import { calcFeasibilityScore, rankCandidates } from "../decision/feasibility.js";
 import { LeadRoleStrategy } from "../../spec/types.js";
-import type {
-  FollowUpResult,
-  AttractionAvailabilityResult,
-  RestaurantAvailabilityResult,
-} from "../../spec/tool-data.js";
 import { toolRegistry } from "../tools/registry.js";
 import { parseIntentWithLLM } from "../llm/intent.js";
 import { DELIVERY_ITEMS } from "../data/mock.js";
@@ -104,12 +99,12 @@ export async function stage2_followUp(
   }
 
   const result = await followUpTool.execute({ constraints });
-  if (result.status === "failed") {
+  if (result.status === "error") {
     return {
       ...state,
       stage: "follow_up_questions",
       constraints,
-      errors: [`追问生成失败: ${result.error}`],
+      errors: [`追问生成失败: ${result.errorInfo.message}`],
     };
   }
 
@@ -117,7 +112,7 @@ export async function stage2_followUp(
     ...state,
     stage: "follow_up_questions",
     constraints,
-    followUpQuestions: result.data as FollowUpResult,
+    followUpQuestions: result.data,
   };
 }
 
@@ -177,7 +172,7 @@ export async function stage3_generateCandidates(
     },
     async (inp): Promise<Attraction[]> => {
       const r = await attractionTool.execute(inp);
-      return r.status === "ok" ? (r.data as Attraction[]) : [];
+      return r.status === "error" ? [] : r.data;
     },
     { minCount: 2 }
   );
@@ -193,7 +188,7 @@ export async function stage3_generateCandidates(
     },
     async (inp): Promise<Restaurant[]> => {
       const r = await restaurantTool.execute(inp);
-      return r.status === "ok" ? (r.data as Restaurant[]) : [];
+      return r.status === "error" ? [] : r.data;
     },
     { minCount: 2 }
   );
@@ -215,7 +210,7 @@ export async function stage3_generateCandidates(
 
   let attractions: Attraction[] = attEsc.items;
   const restaurants: Restaurant[] = restEsc.items;
-  const breaks: BreakPlace[] = breakResult.status === "ok" ? (breakResult.data as BreakPlace[]) : [];
+  const breaks: BreakPlace[] = breakResult.status === "error" ? [] : breakResult.data;
 
   // L2 放宽过滤：景点仍为空则去掉人群标签再搜一次
   if (attractions.length === 0) {
@@ -224,8 +219,8 @@ export async function stage3_generateCandidates(
       timeWindow,
       distance: { maxKm: attEsc.radiusUsed, homeLocation: distance.homeLocation },
     });
-    if (relaxed.status === "ok" && (relaxed.data as Attraction[]).length > 0) {
-      attractions = relaxed.data as Attraction[];
+    if (relaxed.status !== "error" && relaxed.data.length > 0) {
+      attractions = relaxed.data;
       planningNotes.push("景点：已放宽人群标签过滤以补足候选");
     }
   }
@@ -322,7 +317,7 @@ export async function stage4_feasibilityCheck(
           attractionId: act.place.id,
           arrivalTime: act.scheduledStart,
         });
-        if (res.status !== "failed" && !(res.data as AttractionAvailabilityResult).available) {
+        if (res.status !== "error" && !res.data.available) {
           allOk = false;
         }
       }
@@ -333,7 +328,7 @@ export async function stage4_feasibilityCheck(
           diningTime: act.scheduledStart,
           partySize: group.totalPeople,
         });
-        if (res.status !== "failed" && (res.data as RestaurantAvailabilityResult).estimatedWaitMinutes > 30) {
+        if (res.status !== "error" && res.data.estimatedWaitMinutes > 30) {
           allOk = false;
         }
       }
