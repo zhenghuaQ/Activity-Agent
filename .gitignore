@@ -35,5 +35,8 @@ Thumbs.db
 # AI assistant config
 .claude/
 
+# Isolated implementation worktrees
+.worktrees/
+
 # Logs
 *.log
