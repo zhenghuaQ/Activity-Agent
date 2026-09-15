@@ -11,6 +11,8 @@
 // ============================================================
 
 import type { FollowUpAnswer, FollowUpQuestion, PlanningState } from "./types.js";
+import type { RuntimePlan } from "../src/runtime/plan.js";
+import type { TraceEvent } from "../src/runtime/trace.js";
 
 // ─── 标识 ──────────────────────────────────────────────
 
@@ -198,6 +200,10 @@ export interface AgentToolCall {
   durationMs: number;
   /** 错误码（status=error 时） */
   errorCode?: string;
+  /** Runtime 对此次失败采取的恢复动作 */
+  recovery?: "retry" | "fallback";
+  /** 当前逻辑调用的第几次实际尝试（从 1 开始） */
+  attempt?: number;
   /** 调用时间（epoch ms） */
   startedAt: number;
 }
@@ -237,12 +243,22 @@ export interface AgentState {
   status: AgentRunStatus;
   /** 当前执行步骤（步骤名/ID，v1 为字符串） */
   currentStep?: AgentStepRef;
+  /** 本次 Run 的显式 Runtime Plan（初期由默认 Activity Plan 提供） */
+  runtimePlan?: RuntimePlan;
   /** 业务状态：领域规划过程（PlanningState 及其扩展） */
   planning: PlanningState;
   /** 消息流（用户输入/Agent 产出/系统注记/工具返回） */
   messages: AgentMessage[];
   /** 工具调用记录（按调用顺序） */
   toolCalls: AgentToolCall[];
+  /** Runtime Trace 事件（按发生顺序） */
+  trace: TraceEvent[];
+  /** 最近一次候选/方案约束评估结果（Runtime 侧记录，不决定领域过滤策略） */
+  constraintEvaluations?: import("../src/constraints/engine.js").ConstraintEvaluation[];
+  /** 受控重规划计数，用于防止 Agent Loop 无限循环 */
+  replanCount?: number;
+  /** 本次 Run 最大允许重规划次数 */
+  maxReplans?: number;
   /** 错误收集 */
   errors: string[];
   /** 运行结果（终态时必填） */
@@ -270,6 +286,8 @@ export function createAgentState(
     planning: { stage: "intent_parsing", errors: [] },
     messages: [],
     toolCalls: [],
+    trace: [],
+    constraintEvaluations: [],
     errors: [],
   };
 }

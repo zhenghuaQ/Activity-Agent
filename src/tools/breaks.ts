@@ -8,7 +8,7 @@
 import type { BreakPlace } from "../../spec/types.js";
 import type * as T from "../../spec/tools.js";
 import { SEARCH_BREAK_PLACES_TOOL } from "../../spec/tools.js";
-import { BaseTool } from "./base.js";
+import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { getDataSource } from "../data/index.js";
 
 export class SearchBreakPlacesTool extends BaseTool<
@@ -19,13 +19,13 @@ export class SearchBreakPlacesTool extends BaseTool<
   description = SEARCH_BREAK_PLACES_TOOL.description;
   inputSchema = SEARCH_BREAK_PLACES_TOOL.inputSchema;
 
-  async run(input: T.SearchBreakPlacesInput): Promise<BreakPlace[]> {
+  async run(input: T.SearchBreakPlacesInput, context?: ToolExecutionContext): Promise<BreakPlace[]> {
     const ds = getDataSource();
     let results = await ds.searchBreakPlaces({
       origin: input.distance.homeLocation,
       radiusKm: input.distance.maxKm,
       breakSubtype: input.breakSubtype,
-    });
+    }, context?.signal);
 
     // 老年人 → 需要无障碍
     if (input.hasElderly) {

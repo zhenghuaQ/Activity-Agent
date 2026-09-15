@@ -27,7 +27,8 @@ function getAmapConfig(): { apiKey: string; enabled: boolean } {
 export async function estimateTransitWithAmap(
   from: GeoLocation,
   to: GeoLocation,
-  departureTime: string
+  departureTime: string,
+  signal?: AbortSignal
 ): Promise<TransitEstimate> {
   const config = getAmapConfig();
 
@@ -43,7 +44,7 @@ export async function estimateTransitWithAmap(
     url.searchParams.set("strategy", "0");
     url.searchParams.set("extensions", "all");
 
-    const resp = await fetch(url.toString());
+    const resp = await fetch(url.toString(), { signal });
     const json: AmapDrivingResponse = await resp.json();
 
     if (json.status !== "1" || !json.route?.paths?.length) {

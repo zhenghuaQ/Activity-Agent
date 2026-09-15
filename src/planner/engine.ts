@@ -17,6 +17,7 @@ import type {
   Attraction,
   BreakPlace,
   FollowUpAnswer,
+  FollowUpQuestion,
   LeadRole,
   Plan,
   PlanCandidate,
@@ -27,6 +28,7 @@ import type {
 import { calcFeasibilityScore, rankCandidates } from "../decision/feasibility.js";
 import { LeadRoleStrategy } from "../../spec/types.js";
 import { toolRegistry } from "../tools/registry.js";
+import { ToolExecutor } from "../runtime/tool-executor.js";
 import { parseIntentWithLLM } from "../llm/intent.js";
 import { DELIVERY_ITEMS } from "../data/mock.js";
 import type { DeliveryItem } from "../../spec/types.js";
@@ -40,6 +42,21 @@ import {
   createProfile,
 } from "../profile/index.js";
 import { childLogger } from "../core/logger.js";
+import { constraintEngine } from "../constraints/engine.js";
+import { createActivityRuntimePlan, type RuntimePlanStep } from "../runtime/plan.js";
+import { executePlan } from "../runtime/executor.js";
+import { evaluateAgentState } from "../runtime/evaluator.js";
+import { applyReplanPatch, decideReplan } from "../runtime/replanner.js";
+import { appendTraceEvent } from "../runtime/trace.js";
+import {
+  createAgentState,
+  inboundUserInput,
+  outboundDecision,
+  type AgentState,
+  type RunId,
+  type SessionId,
+  type TraceId,
+} from "../../spec/agent.js";
 
 const log = childLogger("planner");
 
@@ -62,7 +79,8 @@ export async function stage1_parseIntent(
 
 export async function stage2_followUp(
   state: PlanningState,
-  answers?: FollowUpAnswer[]
+  answers?: FollowUpAnswer[],
+  toolExecutor?: ToolExecutor
 ): Promise<PlanningState> {
   if (!state.constraints) {
     return { ...state, stage: "follow_up_questions", errors: ["需要先执行 Stage 1"] };
@@ -98,7 +116,9 @@ export async function stage2_followUp(
     };
   }
 
-  const result = await followUpTool.execute({ constraints });
+  const result = await (toolExecutor
+    ? toolExecutor.execute<{ constraints: StructuredConstraints }, FollowUpQuestion[]>("generate_followup_questions", { constraints })
+    : followUpTool.execute({ constraints }));
   if (result.status === "error") {
     return {
       ...state,
@@ -139,7 +159,8 @@ function applyFollowUpPatch(
 // ─── Stage 3: 候选方案生成 ───────────────────────────
 
 export async function stage3_generateCandidates(
-  state: PlanningState
+  state: PlanningState,
+  toolExecutor?: ToolExecutor
 ): Promise<PlanningState> {
   if (!state.constraints) {
     return { ...state, stage: "candidate_generation", errors: ["需要先执行 Stage 1"] };
@@ -171,7 +192,7 @@ export async function stage3_generateCandidates(
       distance: { maxKm: distance.maxKm, homeLocation: distance.homeLocation },
     },
     async (inp): Promise<Attraction[]> => {
-      const r = await attractionTool.execute(inp);
+      const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Attraction[]>("search_attractions", inp) : attractionTool.execute(inp));
       return r.status === "error" ? [] : r.data;
     },
     { minCount: 2 }
@@ -187,7 +208,7 @@ export async function stage3_generateCandidates(
       preferenceTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
     },
     async (inp): Promise<Restaurant[]> => {
-      const r = await restaurantTool.execute(inp);
+      const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Restaurant[]>("search_restaurants", inp) : restaurantTool.execute(inp));
       return r.status === "error" ? [] : r.data;
     },
     { minCount: 2 }
@@ -200,13 +221,16 @@ export async function stage3_generateCandidates(
     deliveryItems = filterWithinRadius(distance.homeLocation, DELIVERY_ITEMS, distance.maxKm);
   }
 
-  const breakResult = await breakTool.execute({
+  const breakInput = {
     breakSubtype: getBreakSubtype(leadRole),
     hasElderly: group.ageGroup.seniors > 0,
     hasYoungChildren: group.ageGroup.youngChildren > 0,
     distance: { maxKm: distance.maxKm, homeLocation: distance.homeLocation },
     afterTime: timeWindow.start,
-  });
+  };
+  const breakResult = await (toolExecutor
+    ? toolExecutor.execute<typeof breakInput, BreakPlace[]>("search_break_places", breakInput)
+    : breakTool.execute(breakInput));
 
   let attractions: Attraction[] = attEsc.items;
   const restaurants: Restaurant[] = restEsc.items;
@@ -214,11 +238,14 @@ export async function stage3_generateCandidates(
 
   // L2 放宽过滤：景点仍为空则去掉人群标签再搜一次
   if (attractions.length === 0) {
-    const relaxed = await attractionTool.execute({
+    const relaxedInput = {
       crowdTags: [],
       timeWindow,
       distance: { maxKm: attEsc.radiusUsed, homeLocation: distance.homeLocation },
-    });
+    };
+    const relaxed = await (toolExecutor
+      ? toolExecutor.execute<typeof relaxedInput, Attraction[]>("search_attractions", relaxedInput)
+      : attractionTool.execute(relaxedInput));
     if (relaxed.status !== "error" && relaxed.data.length > 0) {
       attractions = relaxed.data;
       planningNotes.push("景点：已放宽人群标签过滤以补足候选");
@@ -291,7 +318,8 @@ export async function stage3_generateCandidates(
 // ─── Stage 4: 可行性校验 ──────────────────────────────
 
 export async function stage4_feasibilityCheck(
-  state: PlanningState
+  state: PlanningState,
+  toolExecutor?: ToolExecutor
 ): Promise<PlanningState> {
   if (!state.candidates || state.candidates.length === 0) {
     return { ...state, stage: "feasibility_check", errors: ["无候选方案可校验"] };
@@ -313,21 +341,27 @@ export async function stage4_feasibilityCheck(
     // 对每个活动做可用性检查
     for (const act of cand.plan.activities) {
       if (act.place.type === "attraction") {
-        const res = await availabilityTool.execute({
+        const availabilityInput = {
           attractionId: act.place.id,
           arrivalTime: act.scheduledStart,
-        });
+        };
+        const res = await (toolExecutor
+          ? toolExecutor.execute<typeof availabilityInput, { available: boolean }>("check_attraction_availability", availabilityInput)
+          : availabilityTool.execute(availabilityInput));
         if (res.status !== "error" && !res.data.available) {
           allOk = false;
         }
       }
 
       if (act.place.type === "restaurant") {
-        const res = await restAvailTool.execute({
+        const restaurantAvailabilityInput = {
           restaurantId: act.place.id,
           diningTime: act.scheduledStart,
           partySize: group.totalPeople,
-        });
+        };
+        const res = await (toolExecutor
+          ? toolExecutor.execute<typeof restaurantAvailabilityInput, { estimatedWaitMinutes: number }>("check_restaurant_availability", restaurantAvailabilityInput)
+          : restAvailTool.execute(restaurantAvailabilityInput));
         if (res.status !== "error" && res.data.estimatedWaitMinutes > 30) {
           allOk = false;
         }
@@ -401,11 +435,20 @@ export async function stage5_selectBest(
 
 export interface PlanResult {
   success: boolean;
+  /** 兼容旧调用方的业务状态快照 */
   state: PlanningState;
   message: string;
+  /** Runtime 运行快照：第一阶段开始真正接入 AgentState */
+  agentState: AgentState;
 }
 
 export interface PipelineOptions {
+  /** 可注入的意图解析函数（Runtime / Eval / 测试使用） */
+  parseFn?: (text: string) => StructuredConstraints;
+  /** Runtime 标识：允许上层在未来复用 session/run/trace */
+  runId?: RunId;
+  sessionId?: SessionId;
+  traceId?: TraceId;
   /** 显式用户画像（提供则应用其偏好与权重） */
   profile?: import("../../spec/profile.js").UserProfile;
   /** 无显式画像时，按约束自动推断分层并套用其权重先验 */
@@ -413,62 +456,177 @@ export interface PipelineOptions {
   /** 覆盖天气 / 参考日期（情境调权用） */
   weather?: import("../../spec/decision.js").WeatherCondition;
   date?: Date;
+  /** 当前 AgentRun 的 cooperative cancellation 信号。 */
+  signal?: AbortSignal;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error(String(reason ?? "run_aborted"));
+}
+
+/** @deprecated Runtime 入口请使用 ActivityPlanner.run()。 */
 export async function runFullPipeline(
   rawText: string,
   parseFn?: (text: string) => StructuredConstraints,
   opts: PipelineOptions = {}
 ): Promise<PlanResult> {
-  let state: PlanningState = { stage: "intent_parsing", errors: [] };
+  const agentState: AgentState = createAgentState(
+    { rawText, config: { ...opts } },
+    { runId: opts.runId, sessionId: opts.sessionId, traceId: opts.traceId }
+  );
+  agentState.status = "running";
+  agentState.messages.push(inboundUserInput(rawText, agentState.runId));
+  appendTraceEvent(agentState, { type: "run_started", metadata: { inputLength: rawText.length } });
+
+  let state: PlanningState = agentState.planning;
 
   try {
-    // Stage 1
-    state = await stage1_parseIntent(state, rawText, parseFn!);
+    let weightOverride: ReturnType<typeof applyPersonalization> = undefined;
+    const plan = createActivityRuntimePlan();
 
-    // 个性化：应用画像偏好到约束，并解析权重覆盖
-    const weightOverride = applyPersonalization(state, opts);
-    log.info({ leadRole: state.constraints!.group.leadRole }, "[Stage 1] 意图解析");
-
-    // Stage 2
-    state = await stage2_followUp(state);
-    const followUps = state.followUpQuestions?.length ?? 0;
-    log.info({ followUps }, "[Stage 2] 追问环节");
-
-    // Stage 3
-    state = await stage3_generateCandidates(state);
-    log.info({ candidates: state.candidates?.length ?? 0 }, "[Stage 3] 候选生成");
-
-    // Stage 4
-    state = await stage4_feasibilityCheck(state);
-    log.info({ feasible: state.candidates?.length ?? 0 }, "[Stage 4] 可行性校验");
-
-    // Stage 5
-    state = await stage5_selectBest(state, {
-      weightOverride,
-      weather: opts.weather,
-      date: opts.date,
+    agentState.runtimePlan = plan;
+    appendTraceEvent(agentState, {
+      type: "plan_created",
+      metadata: { planId: plan.id, steps: plan.steps.map((step) => step.id) },
     });
-    log.info(
-      {
-        selected: !!state.selectedPlan,
-        objectives: state.decision?.pareto.map((c) => c.objective),
-        confidence: state.decision?.confidence,
-      },
-      "[Stage 5] 多维决策"
-    );
 
-    if (state.selectedPlan) {
-      return { success: true, state, message: "方案规划完成" };
+    const toolExecutor = new ToolExecutor(agentState, { timeoutMs: 10_000, maxRetries: 1, signal: opts.signal });
+
+    const handlers = {
+      intent_parsing: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage1_parseIntent(current.planning, rawText, parseFn!);
+        weightOverride = applyPersonalization(planning, opts);
+        log.info({ leadRole: planning.constraints!.group.leadRole }, "[Stage 1] 意图解析");
+        return { ...current, planning };
+      },
+      follow_up_questions: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage2_followUp(current.planning, undefined, toolExecutor);
+        log.info({ followUps: planning.followUpQuestions?.length ?? 0 }, "[Stage 2] 追问环节");
+        return { ...current, planning };
+      },
+      candidate_generation: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage3_generateCandidates(current.planning, toolExecutor);
+        log.info({ candidates: planning.candidates?.length ?? 0 }, "[Stage 3] 候选生成");
+        return { ...current, planning };
+      },
+      feasibility_check: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage4_feasibilityCheck(current.planning, toolExecutor);
+        const evaluations = (planning.candidates ?? []).map((candidate) =>
+          constraintEngine.evaluatePlan(candidate.plan, planning.constraints!)
+        );
+        log.info({ feasible: planning.candidates?.length ?? 0 }, "[Stage 4] 可行性校验");
+        return { ...current, planning, constraintEvaluations: evaluations };
+      },
+      fine_scheduling: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage5_selectBest(current.planning, {
+          weightOverride,
+          weather: opts.weather,
+          date: opts.date,
+        });
+        log.info(
+          {
+            selected: !!planning.selectedPlan,
+            objectives: planning.decision?.pareto.map((c) => c.objective),
+            confidence: planning.decision?.confidence,
+          },
+          "[Stage 5] 多维决策"
+        );
+        return { ...current, planning };
+      },
+    };
+
+    throwIfAborted(opts.signal);
+    let executedState = await executePlan(plan, agentState, { handlers });
+    agentState.status = executedState.status;
+    agentState.currentStep = executedState.currentStep;
+    agentState.planning = executedState.planning;
+    state = executedState.planning;
+
+    // Runtime 层第一次形成“执行 → 评估 → 有边界重规划”的反馈回路。
+    // 这里只对距离失败做确定性的搜索半径升级，其它失败保持原行为并进入失败态。
+    for (let attempt = 0; attempt < (agentState.maxReplans ?? 0); attempt += 1) {
+      const evaluation = evaluateAgentState(agentState);
+      agentState.constraintEvaluations = evaluation.evaluation ? [evaluation.evaluation] : [];
+      appendTraceEvent(agentState, {
+        type: "evaluation",
+        metadata: { passed: evaluation.passed, failureRules: evaluation.failures.map((failure) => failure.rule) },
+      });
+
+      if (evaluation.passed) break;
+
+      const decision = decideReplan(agentState, evaluation.failures);
+      if (!decision.shouldReplan || !decision.nextPlan) break;
+
+      agentState.replanCount = (agentState.replanCount ?? 0) + 1;
+      appendTraceEvent(agentState, {
+        type: "replan",
+        metadata: { count: agentState.replanCount, reason: decision.reason, strategy: decision.strategy },
+      });
+      agentState.messages.push({
+        id: `replan_${Date.now().toString(36)}`,
+        createdAt: Date.now(),
+        runId: agentState.runId,
+        direction: "outbound",
+        kind: "text",
+        text: `触发第 ${agentState.replanCount} 次重规划：${decision.reason}`,
+      });
+
+      const replannedState = applyReplanPatch(agentState, decision.patch);
+      replannedState.runtimePlan = decision.nextPlan;
+      replannedState.status = "running";
+
+      executedState = await executePlan(decision.nextPlan, replannedState, { handlers });
+      agentState.status = executedState.status;
+      agentState.currentStep = executedState.currentStep;
+      agentState.planning = executedState.planning;
+      state = executedState.planning;
     }
 
-    return { success: false, state, message: "未能生成可行方案" };
+    const finalEvaluation = evaluateAgentState(agentState);
+    agentState.constraintEvaluations = finalEvaluation.evaluation ? [finalEvaluation.evaluation] : [];
+
+    if (state.selectedPlan && finalEvaluation.passed) {
+      const message = agentState.replanCount
+        ? `方案规划完成（已重规划 ${agentState.replanCount} 次）`
+        : "方案规划完成";
+      agentState.status = "completed";
+      agentState.result = { success: true, message, data: state.decision };
+      appendTraceEvent(agentState, { type: "final", metadata: { success: true, replanCount: agentState.replanCount ?? 0 } });
+      agentState.messages.push(outboundDecision(true, message, agentState.runId));
+      return { success: true, state: agentState.planning, message, agentState };
+    }
+
+    const message = "未能生成满足运行约束的可行方案";
+    agentState.status = "failed";
+    agentState.result = { success: false, message, data: state.decision };
+    appendTraceEvent(agentState, { type: "final", metadata: { success: false, reason: message } });
+    agentState.messages.push(outboundDecision(false, message, agentState.runId));
+    return { success: false, state: agentState.planning, message, agentState };
   } catch (err) {
+    agentState.planning = state;
+    const cancelled = opts.signal?.aborted === true;
+    agentState.status = cancelled ? "cancelled" : "failed";
+    const message = cancelled
+      ? `运行已取消: ${opts.signal?.reason instanceof Error ? opts.signal.reason.message : String(opts.signal?.reason ?? "user_cancelled")}`
+      : `规划异常: ${err instanceof Error ? err.message : String(err)}`;
+    agentState.errors.push(message);
+    agentState.result = { success: false, message };
+    appendTraceEvent(agentState, { type: "error", metadata: { message } });
+    appendTraceEvent(agentState, { type: "final", metadata: { success: false, error: true } });
+    agentState.messages.push(outboundDecision(false, message, agentState.runId));
     log.error({ err: err instanceof Error ? err.message : String(err) }, "规划管线异常");
     return {
       success: false,
-      state,
-      message: `规划异常: ${err instanceof Error ? err.message : String(err)}`,
+      state: agentState.planning,
+      message,
+      agentState,
     };
   }
 }
@@ -499,59 +657,198 @@ const STAGE_TITLES: Record<PlanningStageName, string> = {
  * 与 runFullPipeline 等价，但每完成一个阶段就回调 onStage，
  * 供网关以 SSE 把决策过程实时推给前端看板。
  */
+/** @deprecated Runtime 入口请使用 ActivityPlanner.run()；SSE 请消费 Runtime EventBus。 */
 export async function runFullPipelineStreaming(
   rawText: string,
   parseFn: ((text: string) => StructuredConstraints) | undefined,
   opts: PipelineOptions = {},
   onStage?: (e: StageEvent) => void | Promise<void>
 ): Promise<PlanResult> {
-  let state: PlanningState = { stage: "intent_parsing", errors: [] };
+  const agentState: AgentState = createAgentState(
+    { rawText, config: { ...opts } },
+    { runId: opts.runId, sessionId: opts.sessionId, traceId: opts.traceId }
+  );
+  agentState.status = "running";
+  agentState.messages.push(inboundUserInput(rawText, agentState.runId));
+  appendTraceEvent(agentState, { type: "run_started", metadata: { inputLength: rawText.length, streaming: true } });
+
+  let state: PlanningState = agentState.planning;
   const emit = async (stage: PlanningStageName, index: number, data?: Record<string, unknown>) => {
     if (onStage) await onStage({ stage, index, total: 5, message: STAGE_TITLES[stage], data });
   };
 
   try {
-    state = await stage1_parseIntent(state, rawText, parseFn!);
-    const weightOverride = applyPersonalization(state, opts);
-    await emit("intent_parsing", 1, {
-      scenario: state.constraints!.group.scenario,
-      leadRole: state.constraints!.group.leadRole,
-      people: state.constraints!.group.totalPeople,
+    let weightOverride: ReturnType<typeof applyPersonalization> = undefined;
+    const plan = createActivityRuntimePlan();
+    agentState.runtimePlan = plan;
+    appendTraceEvent(agentState, {
+      type: "plan_created",
+      metadata: { planId: plan.id, steps: plan.steps.map((step) => step.id), streaming: true },
     });
 
-    state = await stage2_followUp(state);
-    await emit("follow_up_questions", 2, {
-      followUps: state.followUpQuestions?.length ?? 0,
+    const stepData = (step: RuntimePlanStep, current: AgentState): Record<string, unknown> | undefined => {
+      const planning = current.planning;
+      switch (step.type) {
+        case "intent_parsing":
+          return {
+            scenario: planning.constraints?.group.scenario,
+            leadRole: planning.constraints?.group.leadRole,
+            people: planning.constraints?.group.totalPeople,
+          };
+        case "follow_up_questions":
+          return { followUps: planning.followUpQuestions?.length ?? 0 };
+        case "candidate_generation":
+          return { candidates: planning.candidates?.length ?? 0 };
+        case "feasibility_check":
+          return { feasible: planning.candidates?.length ?? 0 };
+        case "fine_scheduling":
+          return {
+            selected: !!planning.selectedPlan,
+            objectives: planning.decision?.pareto.map((c) => c.objective) ?? [],
+            confidence: planning.decision?.confidence,
+          };
+      }
+    };
+
+    const toolExecutor = new ToolExecutor(agentState, { timeoutMs: 10_000, maxRetries: 1, signal: opts.signal });
+
+    const handlers = {
+      intent_parsing: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage1_parseIntent(current.planning, rawText, parseFn!);
+        weightOverride = applyPersonalization(planning, opts);
+        return { ...current, planning };
+      },
+      follow_up_questions: async (current: AgentState) => ({
+        ...current,
+        planning: await stage2_followUp(current.planning),
+      }),
+      candidate_generation: async (current: AgentState) => ({
+        ...current,
+        planning: await stage3_generateCandidates(current.planning),
+      }),
+      feasibility_check: async (current: AgentState) => {
+        throwIfAborted(opts.signal);
+        const planning = await stage4_feasibilityCheck(current.planning, toolExecutor);
+        const constraintEvaluations = (planning.candidates ?? []).map((candidate) =>
+          constraintEngine.evaluatePlan(candidate.plan, planning.constraints!)
+        );
+        return { ...current, planning, constraintEvaluations };
+      },
+      fine_scheduling: async (current: AgentState) => ({
+        ...current,
+        planning: await stage5_selectBest(current.planning, {
+          weightOverride,
+          weather: opts.weather,
+          date: opts.date,
+        }),
+      }),
+    };
+
+    throwIfAborted(opts.signal);
+    let executedState = await executePlan(plan, agentState, {
+      handlers,
+      onStep: async (step, current) => {
+        const eventStage = step.type as PlanningStageName;
+        await emit(eventStage, plan.steps.findIndex((item) => item.id === step.id) + 1, stepData(step, current));
+      },
     });
 
-    state = await stage3_generateCandidates(state);
-    await emit("candidate_generation", 3, {
-      candidates: state.candidates?.length ?? 0,
-      notes: state.planningNotes ?? [],
-    });
+    agentState.status = executedState.status;
+    agentState.currentStep = executedState.currentStep;
+    agentState.planning = executedState.planning;
+    state = executedState.planning;
 
-    state = await stage4_feasibilityCheck(state);
-    await emit("feasibility_check", 4, { feasible: state.candidates?.length ?? 0 });
+    for (let attempt = 0; attempt < (agentState.maxReplans ?? 0); attempt += 1) {
+      const evaluation = evaluateAgentState(agentState);
+      agentState.constraintEvaluations = evaluation.evaluation ? [evaluation.evaluation] : [];
+      appendTraceEvent(agentState, {
+        type: "evaluation",
+        metadata: { passed: evaluation.passed, failureRules: evaluation.failures.map((failure) => failure.rule), streaming: true },
+      });
+      if (evaluation.passed) break;
 
-    state = await stage5_selectBest(state, {
-      weightOverride,
-      weather: opts.weather,
-      date: opts.date,
-    });
-    await emit("fine_scheduling", 5, {
-      selected: !!state.selectedPlan,
-      objectives: state.decision?.pareto.map((c) => c.objective) ?? [],
-      confidence: state.decision?.confidence,
-    });
+      const decision = decideReplan(agentState, evaluation.failures);
+      if (!decision.shouldReplan || !decision.nextPlan) break;
 
-    if (state.selectedPlan) return { success: true, state, message: "方案规划完成" };
-    return { success: false, state, message: "未能生成可行方案" };
+      agentState.replanCount = (agentState.replanCount ?? 0) + 1;
+      appendTraceEvent(agentState, {
+        type: "replan",
+        metadata: { count: agentState.replanCount, reason: decision.reason, strategy: decision.strategy, streaming: true },
+      });
+      await emit("candidate_generation", 1, {
+        replan: true,
+        replanCount: agentState.replanCount,
+        reason: decision.reason,
+      });
+
+      const replannedState = applyReplanPatch(agentState, decision.patch);
+      replannedState.runtimePlan = decision.nextPlan;
+      replannedState.status = "running";
+      executedState = await executePlan(decision.nextPlan, replannedState, {
+        handlers,
+        onStep: async (step, current) => {
+          const stage = step.type as PlanningStageName;
+          const data = stepData(step, current);
+          const index = decision.nextPlan?.steps.findIndex((item) => item.id === step.id) ?? -1;
+          await emit(stage, index + 1, data);
+          appendTraceEvent(agentState, {
+            type: "stage_update",
+            stepId: step.id,
+            metadata: {
+              stage,
+              index: index + 1,
+              total: decision.nextPlan?.steps.length ?? 0,
+              data,
+              replan: true,
+            },
+          });
+        },
+      });
+      agentState.status = executedState.status;
+      agentState.currentStep = executedState.currentStep;
+      agentState.planning = executedState.planning;
+      state = executedState.planning;
+    }
+
+    const finalEvaluation = evaluateAgentState(agentState);
+    agentState.constraintEvaluations = finalEvaluation.evaluation ? [finalEvaluation.evaluation] : [];
+
+    if (state.selectedPlan && finalEvaluation.passed) {
+      const message = agentState.replanCount
+        ? `方案规划完成（已重规划 ${agentState.replanCount} 次）`
+        : "方案规划完成";
+      agentState.status = "completed";
+      agentState.result = { success: true, message, data: state.decision };
+      appendTraceEvent(agentState, { type: "final", metadata: { success: true, replanCount: agentState.replanCount ?? 0, streaming: true } });
+      agentState.messages.push(outboundDecision(true, message, agentState.runId));
+      return { success: true, state: agentState.planning, message, agentState };
+    }
+
+    const message = "未能生成满足运行约束的可行方案";
+    agentState.status = "failed";
+    agentState.result = { success: false, message, data: state.decision };
+    appendTraceEvent(agentState, { type: "final", metadata: { success: false, reason: message, streaming: true } });
+    agentState.messages.push(outboundDecision(false, message, agentState.runId));
+    return { success: false, state: agentState.planning, message, agentState };
   } catch (err) {
+    agentState.planning = state;
+    const cancelled = opts.signal?.aborted === true;
+    agentState.status = cancelled ? "cancelled" : "failed";
+    const message = cancelled
+      ? `运行已取消: ${opts.signal?.reason instanceof Error ? opts.signal.reason.message : String(opts.signal?.reason ?? "user_cancelled")}`
+      : `规划异常: ${err instanceof Error ? err.message : String(err)}`;
+    agentState.errors.push(message);
+    agentState.result = { success: false, message };
+    appendTraceEvent(agentState, { type: "error", metadata: { message, streaming: true } });
+    appendTraceEvent(agentState, { type: "final", metadata: { success: false, error: true, streaming: true } });
+    agentState.messages.push(outboundDecision(false, message, agentState.runId));
     log.error({ err: err instanceof Error ? err.message : String(err) }, "规划管线异常");
     return {
       success: false,
-      state,
-      message: `规划异常: ${err instanceof Error ? err.message : String(err)}`,
+      state: agentState.planning,
+      message,
+      agentState,
     };
   }
 }

@@ -13,6 +13,18 @@ describe("runFullPipeline 端到端决策", () => {
     );
 
     expect(result.success).toBe(true);
+    expect(result.agentState.status).toBe("completed");
+    expect(result.agentState.runId).toBeTruthy();
+    expect(result.agentState.sessionId).toBeTruthy();
+    expect(result.agentState.traceId).toBeTruthy();
+    expect(result.agentState.currentStep).toBe("fine_scheduling");
+    expect(result.agentState.messages[0].kind).toBe("user_input");
+    expect(result.agentState.messages.at(-1)?.kind).toBe("decision");
+    expect(
+      result.agentState.messages.filter((message) => message.kind === "tool_result").length
+    ).toBe(result.agentState.toolCalls.length);
+    expect(result.agentState.planning).toBe(result.state);
+
     const { decision, selectedPlan } = result.state;
     expect(decision).toBeDefined();
     expect(selectedPlan).toBeDefined();
@@ -30,6 +42,20 @@ describe("runFullPipeline 端到端决策", () => {
     // 置信度在 0-1
     expect(decision!.confidence).toBeGreaterThan(0);
     expect(decision!.confidence).toBeLessThanOrEqual(1);
+  });
+
+  it("支持由调用方注入 run/session/trace 标识", async () => {
+    const result = await runFullPipeline("朋友4人下午聚会逛展吃饭", parseIntent, {
+      runId: "run_test_001",
+      sessionId: "sess_test_001",
+      traceId: "trace_test_001",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.agentState.runId).toBe("run_test_001");
+    expect(result.agentState.sessionId).toBe("sess_test_001");
+    expect(result.agentState.traceId).toBe("trace_test_001");
+    expect(result.agentState.input.rawText).toContain("朋友4人");
   });
 
   it("首推方案含完整 6 维评分与可解释", async () => {

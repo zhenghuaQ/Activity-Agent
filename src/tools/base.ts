@@ -28,6 +28,11 @@ export interface ContextExtras {
   notes?: string[];
 }
 
+/** Runtime 注入的执行上下文；signal 用于超时/取消时真正中止底层 I/O。 */
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
+}
+
 const EMPTY_STATS: ToolStats = { startedAt: 0, durationMs: 0 };
 const EMPTY_CONTEXT: ToolContext = { toolName: "", input: undefined };
 
@@ -106,19 +111,22 @@ export abstract class BaseTool<TInput, TOutput> {
   /** 输入参数的 JSON Schema —— 模型据此传参 */
   abstract inputSchema: JsonSchemaObject;
   /** 工具作者实现：可返回裸数据（自动包 success 信封）或完整 ToolResponse */
-  protected abstract run(input: TInput): Promise<TOutput | ToolOutput<TOutput>>;
+  protected abstract run(
+    input: TInput,
+    context?: ToolExecutionContext
+  ): Promise<TOutput | ToolOutput<TOutput>>;
 
   /**
    * 公共入口（即 run_with_timing 语义）：
    * 自动注入 stats（计时）与 context（工具名/入参），异常转为 error 信封。
    */
-  async execute(input: TInput): Promise<ToolResponse<TOutput>> {
+  async execute(input: TInput, context: ToolExecutionContext = {}): Promise<ToolResponse<TOutput>> {
     const startedAt = Date.now();
     const startMs = performance.now();
     const baseContext: ToolContext = { toolName: this.name, input };
 
     try {
-      const raw = await this.run(input);
+      const raw = await this.run(input, context);
       const res = normalizeOutput(raw);
       return {
         ...res,

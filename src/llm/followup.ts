@@ -48,7 +48,8 @@ const FOLLOWUP_SCHEMA = {
 };
 
 export async function generateFollowUpWithLLM(
-  constraints: StructuredConstraints
+  constraints: StructuredConstraints,
+  signal?: AbortSignal
 ): Promise<FollowUpQuestion[]> {
   const client = getLLMClient();
   const config = getLLMConfig();
@@ -85,7 +86,7 @@ export async function generateFollowUpWithLLM(
       tool_choice: { type: "function", function: { name: "generate_followup_questions" } },
       temperature: 0.3,
       max_tokens: 600,
-    });
+    }, signal ? { signal } : undefined);
 
     const toolCall = resp.choices[0]?.message?.tool_calls?.[0];
     if (!toolCall || toolCall.type !== "function") {

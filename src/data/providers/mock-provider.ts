@@ -38,7 +38,7 @@ function matchLocalFeatures<T extends { localFeatures: string[] }>(
 export class MockProvider implements DataSource {
   readonly name = "mock";
 
-  async searchAttractions(query: PlaceQuery): Promise<Attraction[]> {
+  async searchAttractions(query: PlaceQuery, _signal?: AbortSignal): Promise<Attraction[]> {
     let list = filterWithinRadius(query.origin, ATTRACTIONS, query.radiusKm);
     list = list.filter(
       (a) =>
@@ -48,7 +48,7 @@ export class MockProvider implements DataSource {
     return query.limit ? list.slice(0, query.limit) : list;
   }
 
-  async searchRestaurants(query: PlaceQuery): Promise<Restaurant[]> {
+  async searchRestaurants(query: PlaceQuery, _signal?: AbortSignal): Promise<Restaurant[]> {
     let list = filterWithinRadius(query.origin, RESTAURANTS, query.radiusKm);
     list = list.filter(
       (r) =>
@@ -58,7 +58,7 @@ export class MockProvider implements DataSource {
     return query.limit ? list.slice(0, query.limit) : list;
   }
 
-  async searchBreakPlaces(query: BreakPlaceQuery): Promise<BreakPlace[]> {
+  async searchBreakPlaces(query: BreakPlaceQuery, _signal?: AbortSignal): Promise<BreakPlace[]> {
     let list = filterWithinRadius(query.origin, BREAK_PLACES, query.radiusKm);
     if (query.breakSubtype) {
       list = list.filter((b) => b.breakSubtype === query.breakSubtype);
@@ -71,15 +71,15 @@ export class MockProvider implements DataSource {
     return query.limit ? list.slice(0, query.limit) : list;
   }
 
-  async getAttractionById(id: string): Promise<Attraction | undefined> {
+  async getAttractionById(id: string, _signal?: AbortSignal): Promise<Attraction | undefined> {
     return ATTRACTIONS.find((a) => a.id === id);
   }
 
-  async getRestaurantById(id: string): Promise<Restaurant | undefined> {
+  async getRestaurantById(id: string, _signal?: AbortSignal): Promise<Restaurant | undefined> {
     return RESTAURANTS.find((r) => r.id === id);
   }
 
-  async geocode(address: string): Promise<GeoLocation | null> {
+  async geocode(address: string, _signal?: AbortSignal): Promise<GeoLocation | null> {
     // Mock 无地理编码服务：命中已知地点名则返回其坐标，否则交由上层降级
     const all = [...ATTRACTIONS, ...RESTAURANTS, ...BREAK_PLACES];
     const hit = all.find(

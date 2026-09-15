@@ -23,7 +23,8 @@ export type ToolErrorCode =
   | "E_STATE_CONFLICT" // 状态冲突（前置条件不满足）
   // 网络相关
   | "E_NETWORK_UNAVAILABLE" // 网络不可用/上游服务不可达
-  | "E_RATE_LIMITED"; // 触发限流
+  | "E_RATE_LIMITED" // 触发限流
+  | "E_CIRCUIT_OPEN"; // Runtime 熔断：近期上游持续失败，暂时拒绝调用
 
 /** 工具错误信息（ToolResponse 中 errorInfo 字段的结构） */
 export interface ToolErrorInfo {
@@ -82,5 +83,10 @@ export const ERROR_CODE_META: Record<
     category: "network",
     retryable: true,
     defaultMessage: "触发限流",
+  },
+  E_CIRCUIT_OPEN: {
+    category: "state",
+    retryable: false,
+    defaultMessage: "工具当前处于熔断状态，请稍后重试",
   },
 };

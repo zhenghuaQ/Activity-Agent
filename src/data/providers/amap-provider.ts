@@ -90,7 +90,8 @@ export class AmapProvider implements DataSource {
     origin: GeoLocation,
     types: string,
     radiusKm: number,
-    keywords?: string[]
+    keywords?: string[],
+    signal?: AbortSignal
   ): Promise<AmapPoi[]> {
     const kw = (keywords ?? []).join("|");
     const radiusM = Math.round(radiusKm * 1000);
@@ -107,7 +108,7 @@ export class AmapProvider implements DataSource {
       url.searchParams.set("page", "1");
       url.searchParams.set("extensions", "all");
 
-      const resp = await fetch(url.toString());
+      const resp = await fetch(url.toString(), { signal });
       const json = (await resp.json()) as { status?: string; pois?: AmapPoi[] };
       if (json.status !== "1" || !Array.isArray(json.pois)) {
         log.warn({ status: json.status }, "高德 POI 返回异常");
@@ -121,13 +122,14 @@ export class AmapProvider implements DataSource {
     return { city: origin.city, district: origin.district };
   }
 
-  async searchAttractions(query: PlaceQuery): Promise<Attraction[]> {
+  async searchAttractions(query: PlaceQuery, signal?: AbortSignal): Promise<Attraction[]> {
     try {
       const pois = await this.fetchAround(
         query.origin,
         TYPE_ATTRACTION,
         query.radiusKm,
-        query.keywords
+        query.keywords,
+        signal
       );
       if (pois.length === 0) return this.fallback.searchAttractions(query);
 
@@ -158,13 +160,14 @@ export class AmapProvider implements DataSource {
     }
   }
 
-  async searchRestaurants(query: PlaceQuery): Promise<Restaurant[]> {
+  async searchRestaurants(query: PlaceQuery, signal?: AbortSignal): Promise<Restaurant[]> {
     try {
       const pois = await this.fetchAround(
         query.origin,
         TYPE_RESTAURANT,
         query.radiusKm,
-        query.keywords
+        query.keywords,
+        signal
       );
       if (pois.length === 0) return this.fallback.searchRestaurants(query);
 
@@ -198,13 +201,14 @@ export class AmapProvider implements DataSource {
     }
   }
 
-  async searchBreakPlaces(query: BreakPlaceQuery): Promise<BreakPlace[]> {
+  async searchBreakPlaces(query: BreakPlaceQuery, signal?: AbortSignal): Promise<BreakPlace[]> {
     try {
       const pois = await this.fetchAround(
         query.origin,
         TYPE_CAFE_TEA,
         query.radiusKm,
-        query.keywords
+        query.keywords,
+        signal
       );
       if (pois.length === 0) return this.fallback.searchBreakPlaces(query);
 
@@ -238,21 +242,21 @@ export class AmapProvider implements DataSource {
     }
   }
 
-  async getAttractionById(id: string): Promise<Attraction | undefined> {
+  async getAttractionById(id: string, _signal?: AbortSignal): Promise<Attraction | undefined> {
     return this.fallback.getAttractionById(id);
   }
 
-  async getRestaurantById(id: string): Promise<Restaurant | undefined> {
+  async getRestaurantById(id: string, _signal?: AbortSignal): Promise<Restaurant | undefined> {
     return this.fallback.getRestaurantById(id);
   }
 
-  async geocode(address: string): Promise<GeoLocation | null> {
+  async geocode(address: string, signal?: AbortSignal): Promise<GeoLocation | null> {
     try {
       return await this.geoCache.wrap(address, async () => {
         const url = new URL(AMAP_GEOCODE);
         url.searchParams.set("key", this.apiKey);
         url.searchParams.set("address", address);
-        const resp = await fetch(url.toString());
+        const resp = await fetch(url.toString(), { signal });
         const json = (await resp.json()) as {
           status?: string;
           geocodes?: Array<{ location?: string; city?: string; district?: string }>;
@@ -260,7 +264,7 @@ export class AmapProvider implements DataSource {
         const g = json.geocodes?.[0];
         const coord = parseLocation(g?.location);
         if (json.status !== "1" || !coord) {
-          return this.fallback.geocode(address);
+          return this.fallback.geocode(address, signal);
         }
         return {
           ...coord,
@@ -271,7 +275,7 @@ export class AmapProvider implements DataSource {
       });
     } catch (err) {
       log.warn({ err: err instanceof Error ? err.message : String(err) }, "高德地理编码失败，降级");
-      return this.fallback.geocode(address);
+      return this.fallback.geocode(address, signal);
     }
   }
 

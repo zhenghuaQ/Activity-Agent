@@ -11,7 +11,7 @@ import {
   SEARCH_RESTAURANTS_TOOL,
   CHECK_RESTAURANT_AVAILABILITY_TOOL,
 } from "../../spec/tools.js";
-import { BaseTool } from "./base.js";
+import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
@@ -26,13 +26,13 @@ export class SearchRestaurantsTool extends BaseTool<
   description = SEARCH_RESTAURANTS_TOOL.description;
   inputSchema = SEARCH_RESTAURANTS_TOOL.inputSchema;
 
-  async run(input: T.SearchRestaurantsInput): Promise<Restaurant[]> {
+  async run(input: T.SearchRestaurantsInput, context?: ToolExecutionContext): Promise<Restaurant[]> {
     const ds = getDataSource();
     let results = await ds.searchRestaurants({
       origin: input.distance.homeLocation,
       radiusKm: input.distance.maxKm,
       localFeatures: input.localFeatures,
-    });
+    }, context?.signal);
 
     // 忌口匹配
     const restrictions = input.dietaryRestrictions ?? [];
@@ -84,9 +84,10 @@ export class CheckRestaurantAvailabilityTool extends BaseTool<
   inputSchema = CHECK_RESTAURANT_AVAILABILITY_TOOL.inputSchema;
 
   async run(
-    input: T.CheckRestaurantAvailabilityInput
+    input: T.CheckRestaurantAvailabilityInput,
+    context?: ToolExecutionContext
   ): Promise<T.RestaurantAvailability> {
-    const rest = await getDataSource().getRestaurantById(input.restaurantId);
+    const rest = await getDataSource().getRestaurantById(input.restaurantId, context?.signal);
     if (!rest) throw new ToolError("E_RESOURCE_NOT_FOUND", `餐厅 ${input.restaurantId} 不存在`);
 
     // 拥挤度启发式：综合时段/热度/真实排队数预测等待

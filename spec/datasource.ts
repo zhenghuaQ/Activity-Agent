@@ -67,13 +67,13 @@ export interface DataSource {
   /** 数据源标识，用于日志/可观测（如 "mock" / "amap" / "amap+mock"） */
   readonly name: string;
 
-  searchAttractions(query: PlaceQuery): Promise<Attraction[]>;
-  searchRestaurants(query: PlaceQuery): Promise<Restaurant[]>;
-  searchBreakPlaces(query: BreakPlaceQuery): Promise<BreakPlace[]>;
+  searchAttractions(query: PlaceQuery, signal?: AbortSignal): Promise<Attraction[]>;
+  searchRestaurants(query: PlaceQuery, signal?: AbortSignal): Promise<Restaurant[]>;
+  searchBreakPlaces(query: BreakPlaceQuery, signal?: AbortSignal): Promise<BreakPlace[]>;
 
-  getAttractionById(id: string): Promise<Attraction | undefined>;
-  getRestaurantById(id: string): Promise<Restaurant | undefined>;
+  getAttractionById(id: string, signal?: AbortSignal): Promise<Attraction | undefined>;
+  getRestaurantById(id: string, signal?: AbortSignal): Promise<Restaurant | undefined>;
 
   /** 地址 → 经纬度；失败返回 null（调用方负责降级） */
-  geocode(address: string): Promise<GeoLocation | null>;
+  geocode(address: string, signal?: AbortSignal): Promise<GeoLocation | null>;
 }

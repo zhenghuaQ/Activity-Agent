@@ -11,7 +11,7 @@ import {
   SEARCH_ATTRACTIONS_TOOL,
   CHECK_ATTRACTION_AVAILABILITY_TOOL,
 } from "../../spec/tools.js";
-import { BaseTool } from "./base.js";
+import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
@@ -26,14 +26,14 @@ export class SearchAttractionsTool extends BaseTool<
   description = SEARCH_ATTRACTIONS_TOOL.description;
   inputSchema = SEARCH_ATTRACTIONS_TOOL.inputSchema;
 
-  async run(input: T.SearchAttractionsInput): Promise<Attraction[]> {
+  async run(input: T.SearchAttractionsInput, context?: ToolExecutionContext): Promise<Attraction[]> {
     const ds = getDataSource();
     let results = await ds.searchAttractions({
       origin: input.distance.homeLocation,
       radiusKm: input.distance.maxKm,
       keywords: input.keywords,
       localFeatures: input.localFeatures,
-    });
+    }, context?.signal);
 
     // 人群标签匹配（业务过滤）
     if (input.crowdTags.length > 0) {
@@ -59,8 +59,8 @@ export class CheckAttractionAvailabilityTool extends BaseTool<
   description = CHECK_ATTRACTION_AVAILABILITY_TOOL.description;
   inputSchema = CHECK_ATTRACTION_AVAILABILITY_TOOL.inputSchema;
 
-  async run(input: T.CheckAttractionAvailabilityInput): Promise<T.AttractionAvailability> {
-    const attr = await getDataSource().getAttractionById(input.attractionId);
+  async run(input: T.CheckAttractionAvailabilityInput, context?: ToolExecutionContext): Promise<T.AttractionAvailability> {
+    const attr = await getDataSource().getAttractionById(input.attractionId, context?.signal);
     if (!attr) {
       throw new ToolError("E_RESOURCE_NOT_FOUND", `景点 ${input.attractionId} 不存在`);
     }
