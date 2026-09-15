@@ -167,6 +167,7 @@ export async function stage3_generateCandidates(
   }
 
   const { group, timeWindow, distance } = state.constraints;
+  const searchRadiusKm = state.searchPolicy?.radiusKm ?? distance.maxKm;
   const leadRole = group.leadRole;
   const errors: string[] = [];
   const planningNotes: string[] = [];
@@ -189,7 +190,7 @@ export async function stage3_generateCandidates(
     {
       crowdTags: getCrowdTagsForScenario(group.scenario, group.leadRole),
       timeWindow,
-      distance: { maxKm: distance.maxKm, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
     },
     async (inp): Promise<Attraction[]> => {
       const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Attraction[]>("search_attractions", inp) : attractionTool.execute(inp));
@@ -203,7 +204,7 @@ export async function stage3_generateCandidates(
     {
       group,
       timeWindow,
-      distance: { maxKm: distance.maxKm, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
       dietaryRestrictions: group.preferences.dietaryRestrictions,
       preferenceTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
     },
@@ -225,7 +226,7 @@ export async function stage3_generateCandidates(
     breakSubtype: getBreakSubtype(leadRole),
     hasElderly: group.ageGroup.seniors > 0,
     hasYoungChildren: group.ageGroup.youngChildren > 0,
-    distance: { maxKm: distance.maxKm, homeLocation: distance.homeLocation },
+    distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
     afterTime: timeWindow.start,
   };
   const breakResult = await (toolExecutor
@@ -241,7 +242,7 @@ export async function stage3_generateCandidates(
     const relaxedInput = {
       crowdTags: [],
       timeWindow,
-      distance: { maxKm: attEsc.radiusUsed, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
     };
     const relaxed = await (toolExecutor
       ? toolExecutor.execute<typeof relaxedInput, Attraction[]>("search_attractions", relaxedInput)
@@ -309,6 +310,8 @@ export async function stage3_generateCandidates(
   return {
     ...state,
     stage: "candidate_generation",
+    searchPolicy: state.searchPolicy ?? { radiusKm: searchRadiusKm },
+    planRevision: state.planRevision ?? 0,
     candidates,
     planningNotes,
     errors,

@@ -9,12 +9,16 @@ import type { AgentState } from "../../spec/agent.js";
 import type { ConstraintCheck } from "../../spec/constraints.js";
 import type { RuntimePlan } from "./plan.js";
 
+export interface ReplanPatch {
+  searchRadiusKm: number;
+}
+
 export interface ReplanDecision {
   shouldReplan: boolean;
   reason: string;
   strategy?: "expand_search_radius" | "regenerate_candidates";
   nextPlan?: RuntimePlan;
-  patch?: { maxDistanceKm?: number };
+  patch?: ReplanPatch;
 }
 
 const MAX_SEARCH_RADIUS_KM = 30;
@@ -30,7 +34,8 @@ export function decideReplan(
 ): ReplanDecision {
   const distanceFailure = failures.find((f) => f.rule === "within_distance");
   if (distanceFailure && state.planning.constraints) {
-    const current = state.planning.constraints.distance.maxKm;
+    const current = state.planning.searchPolicy?.radiusKm
+      ?? state.planning.constraints.distance.maxKm;
     const next = Math.min(MAX_SEARCH_RADIUS_KM, Math.max(current + 1, Math.round(current * RADIUS_FACTOR * 10) / 10));
 
     if (next > current) {
@@ -38,7 +43,7 @@ export function decideReplan(
         shouldReplan: true,
         reason: distanceFailure.detail,
         strategy: "expand_search_radius",
-        patch: { maxDistanceKm: next },
+        patch: { searchRadiusKm: next },
         nextPlan: createReplanPlan(),
       };
     }
@@ -74,21 +79,21 @@ function createReplanPlan(): RuntimePlan {
 
 export function applyReplanPatch(
   state: AgentState,
-  patch?: ReplanDecision["patch"]
+  patch?: ReplanPatch,
 ): AgentState {
-  if (!patch?.maxDistanceKm || !state.planning.constraints) return state;
+  if (!patch) return state;
 
   return {
     ...state,
+    constraintEvaluations: [],
     planning: {
-      ...state.planning,
-      constraints: {
-        ...state.planning.constraints,
-        distance: {
-          ...state.planning.constraints.distance,
-          maxKm: patch.maxDistanceKm,
-        },
-      },
+      stage: "candidate_generation",
+      constraints: state.planning.constraints,
+      followUpQuestions: state.planning.followUpQuestions,
+      planningNotes: state.planning.planningNotes,
+      errors: [],
+      searchPolicy: { radiusKm: patch.searchRadiusKm },
+      planRevision: (state.planning.planRevision ?? 0) + 1,
     },
   };
 }

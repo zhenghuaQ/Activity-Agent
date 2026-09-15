@@ -142,6 +142,10 @@ export class ActivityPlanner {
           throwIfAborted(opts.signal);
           const planning = await stage1_parseIntent(current.planning, rawText, parseFn);
           weightOverride = applyPersonalization(planning, opts);
+          planning.searchPolicy ??= {
+            radiusKm: planning.constraints!.distance.maxKm,
+          };
+          planning.planRevision ??= 0;
           return { ...current, planning };
         },
         follow_up_questions: async (current: AgentState) => {

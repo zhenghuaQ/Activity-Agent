@@ -23,8 +23,8 @@ export interface AgentEvaluation {
  * 这里只验收 selectedPlan，不改动领域候选过滤逻辑。
  */
 export function evaluateAgentState(state: AgentState): AgentEvaluation {
-  const plan = state.planning.selectedPlan;
-  if (!plan || !state.planning.constraints) {
+  const { constraints, selectedPlan: plan } = state.planning;
+  if (!plan || !constraints) {
     return {
       passed: false,
       plan,
@@ -38,10 +38,8 @@ export function evaluateAgentState(state: AgentState): AgentEvaluation {
     };
   }
 
-  const evaluation = constraintEngine.evaluatePlan(
-    plan,
-    state.planning.constraints
-  );
+  // searchPolicy only broadens discovery; acceptance always uses user constraints.
+  const evaluation = constraintEngine.evaluatePlan(plan, constraints);
 
   return {
     passed: evaluation.passed,

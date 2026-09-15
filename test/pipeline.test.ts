@@ -24,6 +24,10 @@ describe("runFullPipeline 端到端决策", () => {
       result.agentState.messages.filter((message) => message.kind === "tool_result").length
     ).toBe(result.agentState.toolCalls.length);
     expect(result.agentState.planning).toBe(result.state);
+    expect(result.state.searchPolicy?.radiusKm).toBe(
+      result.state.constraints?.distance.maxKm,
+    );
+    expect(result.state.planRevision).toBe(0);
 
     const { decision, selectedPlan } = result.state;
     expect(decision).toBeDefined();

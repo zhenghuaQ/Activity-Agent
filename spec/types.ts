@@ -325,6 +325,12 @@ export type PlanningStage =
 export interface PlanningState {
   stage: PlanningStage;
   constraints?: StructuredConstraints;
+  /** Runtime may expand discovery without changing the user's acceptance constraint. */
+  searchPolicy?: {
+    radiusKm: number;
+  };
+  /** Incremented whenever derived planning artifacts are invalidated. */
+  planRevision?: number;
   followUpQuestions?: FollowUpQuestion[];
   candidates?: PlanCandidate[];
   selectedPlan?: Plan;
