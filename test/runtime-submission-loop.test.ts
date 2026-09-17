@@ -88,4 +88,34 @@ describe("session submission loop", () => {
     expect((await turn).status).toBe("failed");
     loop.stop();
   });
+
+  it("does not starve a timer-driven active turn when another turn is queued", async () => {
+    const events: string[] = [];
+    const loop = createSessionSubmissionLoop("sess_timer", {
+      executeTurn: async (submission) => {
+        events.push(`start:${submission.input.content}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        events.push(`end:${submission.input.content}`);
+        return {
+          submissionId: submission.id,
+          status: "completed",
+          sessionId: submission.sessionId,
+          traceId: submission.traceId,
+        };
+      },
+      executeControl: async (submission) => ({
+        submissionId: submission.id,
+        status: "completed",
+        sessionId: submission.sessionId,
+        traceId: submission.traceId,
+      }),
+    });
+
+    const first = loop.submit(createSubmission("one", { sessionId: "sess_timer" }));
+    const second = loop.submit(createSubmission("two", { sessionId: "sess_timer" }));
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(events).toEqual(["start:one", "end:one", "start:two", "end:two"]);
+    loop.stop();
+  });
 });

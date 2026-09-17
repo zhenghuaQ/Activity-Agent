@@ -42,7 +42,8 @@ export interface SubmissionLoopHandlers {
  * - control op 可以穿过正在运行的 turn，从而及时执行 cancel/inspect。
  */
 export class SessionSubmissionLoop {
-  private readonly queue: QueuedSubmission[] = [];
+  private readonly turnQueue: QueuedSubmission[] = [];
+  private readonly controlQueue: QueuedSubmission[] = [];
   private running = false;
   private stopped = false;
   private currentTurn:
@@ -52,8 +53,8 @@ export class SessionSubmissionLoop {
         promise: Promise<void>;
       }
     | undefined;
-  private notification: Promise<void> | undefined;
-  private notifyResolve: (() => void) | undefined;
+  private controlNotification: Promise<void> | undefined;
+  private resolveControlNotification: (() => void) | undefined;
 
   constructor(
     readonly sessionId: SessionId,
@@ -75,8 +76,12 @@ export class SessionSubmissionLoop {
       submission,
       deferred: deferred<SubmissionResult>(),
     };
-    this.queue.push(item);
-    this.notify();
+    if (submission.op.type === "turn") {
+      this.turnQueue.push(item);
+    } else {
+      this.controlQueue.push(item);
+      this.notifyControl();
+    }
     this.ensureStarted();
     return item.deferred.promise;
   }
@@ -86,14 +91,24 @@ export class SessionSubmissionLoop {
   }
 
   queuedCount(): number {
-    return this.queue.length;
+    return this.turnQueue.length + this.controlQueue.length;
+  }
+
+  isIdle(): boolean {
+    return !this.currentTurn
+      && this.turnQueue.length === 0
+      && this.controlQueue.length === 0;
   }
 
   stop(reason = "Session submission loop 已停止"): void {
+    if (this.stopped) return;
     this.stopped = true;
     this.currentTurn?.controller.abort(reason);
 
-    for (const item of this.queue.splice(0)) {
+    for (const item of [
+      ...this.turnQueue.splice(0),
+      ...this.controlQueue.splice(0),
+    ]) {
       item.deferred.resolve({
         submissionId: item.submission.id,
         status: "rejected",
@@ -102,7 +117,7 @@ export class SessionSubmissionLoop {
         error: reason,
       });
     }
-    this.notify();
+    this.notifyControl();
   }
 
   private ensureStarted(): void {
@@ -114,55 +129,46 @@ export class SessionSubmissionLoop {
   private async loop(): Promise<void> {
     try {
       while (!this.stopped) {
-        if (this.currentTurn) {
-          // Turn 正在运行：只有 control op 可以立刻穿透；新的 turn 继续排队。
-          const nextSignal = await Promise.race([
-            this.currentTurn.promise.then(() => "completed" as const),
-            this.waitForNotification().then(() => "submission" as const),
-          ]);
-
-          if (nextSignal === "completed") {
-            continue;
-          }
-
-          const control = this.takeNextControl();
-          if (control) {
-            await this.handleItem(control);
-          }
+        const control = this.controlQueue.shift();
+        if (control) {
+          await this.handleControl(control);
           continue;
         }
 
-        const item = this.queue.shift();
-        if (!item) {
-          await this.waitForNotification();
+        if (!this.currentTurn) {
+          const turn = this.turnQueue.shift();
+          if (!turn) return;
+          this.startTurn(turn);
           continue;
         }
 
-        await this.handleItem(item);
+        await Promise.race([
+          this.currentTurn.promise,
+          this.waitForControl(),
+        ]);
       }
     } finally {
       this.running = false;
     }
   }
 
-  private async handleItem(item: QueuedSubmission): Promise<void> {
+  private async handleControl(item: QueuedSubmission): Promise<void> {
     const { submission } = item;
-
-    if (submission.op.type !== "turn") {
-      try {
-        item.deferred.resolve(await this.handlers.executeControl(submission));
-      } catch (error) {
-        item.deferred.resolve({
-          submissionId: submission.id,
-          status: "failed",
-          sessionId: submission.sessionId,
-          traceId: submission.traceId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      return;
+    try {
+      item.deferred.resolve(await this.handlers.executeControl(submission));
+    } catch (error) {
+      item.deferred.resolve({
+        submissionId: submission.id,
+        status: "failed",
+        sessionId: submission.sessionId,
+        traceId: submission.traceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
+  }
 
+  private startTurn(item: QueuedSubmission): void {
+    const { submission } = item;
     const controller = new AbortController();
     const completion = this.handlers
       .executeTurn(submission, controller)
@@ -180,7 +186,6 @@ export class SessionSubmissionLoop {
         if (this.currentTurn?.submissionId === submission.id) {
           this.currentTurn = undefined;
         }
-        this.notify();
       });
 
     this.currentTurn = {
@@ -190,29 +195,21 @@ export class SessionSubmissionLoop {
     };
   }
 
-  private takeNextControl(): QueuedSubmission | undefined {
-    const index = this.queue.findIndex(
-      (item) => item.submission.op.type !== "turn",
-    );
-    if (index < 0) return undefined;
-    return this.queue.splice(index, 1)[0];
-  }
-
-  private async waitForNotification(): Promise<void> {
-    if (this.queue.length > 0) return;
-    if (!this.notification) {
-      this.notification = new Promise<void>((resolve) => {
-        this.notifyResolve = resolve;
+  private async waitForControl(): Promise<void> {
+    if (this.controlQueue.length > 0) return;
+    if (!this.controlNotification) {
+      this.controlNotification = new Promise<void>((resolve) => {
+        this.resolveControlNotification = resolve;
       }).finally(() => {
-        this.notification = undefined;
-        this.notifyResolve = undefined;
+        this.controlNotification = undefined;
+        this.resolveControlNotification = undefined;
       });
     }
-    await this.notification;
+    await this.controlNotification;
   }
 
-  private notify(): void {
-    this.notifyResolve?.();
+  private notifyControl(): void {
+    this.resolveControlNotification?.();
   }
 }
 
