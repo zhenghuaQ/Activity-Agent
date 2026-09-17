@@ -62,7 +62,7 @@ ai-activity-agent/
 ├── scripts/
 │   └── start.mjs          # 一键启动脚本（跨平台）
 ├── eval/                  # Harness Engineering（场景用例 + 评估）
-├── test/                  # 单元测试（13 文件 / 70 用例）
+├── test/                  # 单元与 Runtime 集成测试
 ├── DESIGN.md              # 详细设计文档
 └── package.json
 ```
@@ -282,6 +282,22 @@ server {
 
 ---
 
+## Runtime 架构
+
+`AgentRuntime` 是生产环境唯一执行入口：Channel 请求先标准化为
+`Submission`，再由 Session mailbox 串行化同一会话的 Turn，并交给
+`ActivityPlanner` 执行。`ActivityPlanner` 是唯一的活动领域编排器；
+`runFullPipeline*` 仅作为 deprecated 兼容适配器并委托同一 Planner。
+
+Runtime Plan 使用带 `dependsOn`、`reads`、`writes` 的 DAG 契约并按 Ready
+Set 推进；当前执行器仍采用单 Step 串行执行，为后续受限并发保留边界。
+重规划只扩展可变的 `searchPolicy.radiusKm`，不会修改用户原始距离约束。
+
+Session 存储设有会话数、闲置时间和消息数上限；未提供 Session ID 的
+HTTP 请求使用完成后释放的临时会话。取消信号从 HTTP/SSE 断开一路传播到
+LLM、Tool、数据 Provider 和通勤 I/O，取消不会被转换成 Mock/fallback。
+Eval 的 Runtime 对照组直接通过 `AgentRuntime` 运行，不经过兼容 API。
+
 ## 设计理念
 
 - **先粗筛后精校** — 先用距离+人群标签过滤，再逐项查可用性，避免无效 API 调用
@@ -294,7 +310,7 @@ server {
 - **运行时**：Node.js (tsx)
 - **后端**：Fastify + OpenAI function calling + Pino
 - **前端**：React 18 + Vite + Recharts
-- **测试**：Vitest（13 文件 / 70 用例）
+- **测试**：Vitest（单元、Runtime 生命周期、HTTP/SSE 与 Eval 集成测试）
 - **设计范式**：Specification-Driven Development + Harness Engineering
 
 ## License

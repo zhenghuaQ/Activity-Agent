@@ -16,6 +16,8 @@ export interface EvalCaseResult {
   traceEvents: number;
   errors: string[];
   planId?: string;
+  runtimeEntry?: "agent_runtime";
+  terminalStatus?: "completed" | "failed" | "cancelled";
 }
 
 export interface EvalComparison {

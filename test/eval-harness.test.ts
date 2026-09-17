@@ -15,7 +15,9 @@ describe("Evaluation Harness V2", () => {
     expect(baseline.caseName).toBe("smoke");
     expect(runtime.caseName).toBe("smoke");
     expect(runtime.runner).toBe("runtime");
+    expect(runtime.runtimeEntry).toBe("agent_runtime");
+    expect(runtime.terminalStatus).toBe("completed");
     expect(runtime.traceEvents).toBeGreaterThan(0);
-    expect(runtime.toolCalls).toBeGreaterThanOrEqual(0);
+    expect(runtime.toolCalls).toBeGreaterThan(0);
   });
 });

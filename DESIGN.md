@@ -136,3 +136,20 @@ ai-activity-agent/
 - 增加天气 API → 动态调整室内/室外景点权重
 - 替换 Mock 数据为真实 LBS 数据源
 - 增加历史决策记录与用户反馈闭环
+
+## 八、Runtime / Domain 边界
+
+生产执行路径统一为：
+
+```text
+Channel → Submission → SessionSubmissionLoop → AgentRuntime
+        → AgentState → ActivityPlanner → RuntimePlan → Executor → Stage/Tool
+```
+
+- `AgentRuntime` 管理 Submission、Session、Run 所有权、取消与清理。
+- `ActivityPlanner` 是唯一活动领域编排器；兼容 API 只做参数与事件适配。
+- Runtime Plan 是 DAG-ready 契约，校验依赖与资源冲突；当前仍串行执行 Ready Step。
+- 用户约束保持不可变；重规划只修改 `searchPolicy` 并使旧派生状态失效。
+- Session transcript 与会话数量均有上限；匿名 HTTP 会话为 ephemeral。
+- HTTP/SSE 断开通过结构化取消传播到 LLM、Tool、Provider 与通勤请求。
+- Eval Runtime 组从 `AgentRuntime` 入口运行，并记录终态、Tool 与 Trace 指标。

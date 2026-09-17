@@ -40,7 +40,8 @@ function printResult(label: string, result: EvalCaseResult): void {
     `latency=${result.durationMs}ms ` +
     `replans=${result.replanCount} ` +
     `tools=${result.toolCalls} ` +
-    `trace=${result.traceEvents}`,
+    `trace=${result.traceEvents}` +
+    (result.runtimeEntry ? ` entry=${result.runtimeEntry} status=${result.terminalStatus}` : ""),
   );
 
   if (result.errors.length > 0) {
