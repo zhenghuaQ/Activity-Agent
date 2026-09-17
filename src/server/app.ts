@@ -30,7 +30,10 @@ export interface ServerOptions {
 }
 
 /** Fastify 原生请求 → 协议无关请求 */
-function toChannelRequest(req: FastifyRequest): ChannelRequest {
+function toChannelRequest(
+  req: FastifyRequest,
+  signal?: AbortSignal,
+): ChannelRequest {
   return {
     method: req.method as ChannelRequest["method"],
     path: req.url.split("?")[0],
@@ -39,6 +42,7 @@ function toChannelRequest(req: FastifyRequest): ChannelRequest {
     body: req.body,
     headers: req.headers,
     clientIp: req.ip,
+    ...(signal ? { signal } : {}),
   };
 }
 
@@ -100,8 +104,15 @@ function bindPlainRoute(app: FastifyInstance, route: ChannelRoute): void {
     method: route.method,
     url: route.path,
     handler: async (req, reply) => {
-      const res = await route.handler!(toChannelRequest(req));
-      return applyChannelResponse(reply, res);
+      const controller = new AbortController();
+      const onAborted = () => controller.abort(new Error("client_disconnected"));
+      req.raw.once("aborted", onAborted);
+      try {
+        const res = await route.handler!(toChannelRequest(req, controller.signal));
+        return applyChannelResponse(reply, res);
+      } finally {
+        req.raw.removeListener("aborted", onAborted);
+      }
     },
   });
 }
@@ -116,8 +127,12 @@ function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
     url: route.path,
     handler: async (req, reply) => {
       let hijacked = false;
+      const controller = new AbortController();
+      const onClose = () => controller.abort(new Error("client_disconnected"));
+      reply.raw.once("close", onClose);
 
       const emit = (event: string, data: unknown) => {
+        if (controller.signal.aborted || reply.raw.destroyed) return;
         if (!hijacked) {
           reply.hijack();
           reply.raw.writeHead(200, {
@@ -131,10 +146,15 @@ function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
         reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       };
 
-      const res = await route.stream!(toChannelRequest(req), emit);
+      let res: void | ChannelResponse;
+      try {
+        res = await route.stream!(toChannelRequest(req, controller.signal), emit);
+      } finally {
+        reply.raw.removeListener("close", onClose);
+      }
 
       if (hijacked) {
-        reply.raw.end();
+        if (!reply.raw.destroyed) reply.raw.end();
         return reply;
       }
       // 未建立流：以普通响应返回（如参数校验失败）

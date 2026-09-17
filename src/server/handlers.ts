@@ -25,9 +25,18 @@ import { getAppConfig } from "../core/config.js";
 import { metrics } from "./metrics.js";
 import { getRuntimeFlags, setRuntimeFlags, type RuntimeFlags } from "./flags.js";
 import { getOpenApiSpec } from "./openapi.js";
-import { defaultRuntimeEventBus } from "../runtime/event-bus.js";
+import {
+  defaultRuntimeEventBus,
+  type RuntimeEventBus,
+} from "../runtime/event-bus.js";
 import { newAgentId } from "../../spec/agent.js";
-import { createAgentInput, createSubmission, defaultAgentRuntime } from "../runtime/index.js";
+import {
+  createAgentInput,
+  createSubmission,
+  defaultAgentRuntime,
+  type AgentRuntime,
+  type SubmissionResult,
+} from "../runtime/index.js";
 import { SWAGGER_HTML } from "./swagger-html.js";
 
 // ─── 内部工具 ──────────────────────────────────────────
@@ -47,6 +56,18 @@ interface ProfileBody {
   segment?: UserSegment;
   override?: UserProfile["override"];
 }
+
+export interface HandlerDependencies {
+  runtime: Pick<AgentRuntime, "submit" | "submitSubmission">;
+  eventBus: RuntimeEventBus;
+  createId: (prefix: string) => string;
+}
+
+const DEFAULT_DEPENDENCIES: HandlerDependencies = {
+  runtime: defaultAgentRuntime,
+  eventBus: defaultRuntimeEventBus,
+  createId: newAgentId,
+};
 
 /** 解析请求所用画像：profileId 优先，其次 segment 临时画像 */
 async function resolveRequestProfile(
@@ -78,11 +99,12 @@ function badRequest(message: string): ChannelResponse {
 function resolveSession(
   req: ChannelRequest,
   explicit?: string,
+  createId: (prefix: string) => string = newAgentId,
 ): { sessionId: string; sessionRetention: "retained" | "ephemeral" } {
   const supplied = explicit?.trim() || req.headers["x-session-id"]?.toString().trim();
   return supplied
     ? { sessionId: supplied, sessionRetention: "retained" }
-    : { sessionId: newAgentId("sess"), sessionRetention: "ephemeral" };
+    : { sessionId: createId("sess"), sessionRetention: "ephemeral" };
 }
 
 // ─── 处理器 ────────────────────────────────────────────
@@ -103,21 +125,24 @@ async function health(_req: ChannelRequest): Promise<ChannelResponse> {
 }
 
 /** 同步决策 */
-async function decide(req: ChannelRequest): Promise<ChannelResponse> {
+async function decide(
+  req: ChannelRequest,
+  deps: HandlerDependencies,
+): Promise<ChannelResponse> {
   const body = (req.body || {}) as DecideBody;
   if (!body.text || !body.text.trim()) {
     return badRequest("缺少 text");
   }
   const profile = await resolveRequestProfile(body.profileId, body.segment);
-  const session = resolveSession(req, body.sessionId);
-  const result = await defaultAgentRuntime.submit(
+  const session = resolveSession(req, body.sessionId, deps.createId);
+  const result = await deps.runtime.submit(
     createAgentInput(body.text, {
       profile,
       autoSegment: body.autoSegment,
       weather: body.weather,
       parseFn: pickParseFn(),
     }),
-    { ...session, op: { type: "turn" } },
+    { ...session, op: { type: "turn" }, signal: req.signal },
   );
 
   if (!result.result || typeof result.result !== "object") {
@@ -139,6 +164,7 @@ async function decide(req: ChannelRequest): Promise<ChannelResponse> {
       submissionId: result.submissionId,
       sessionId: result.sessionId,
       runId: result.runId,
+      traceId: result.traceId,
       success: pipelineResult.success,
       message: pipelineResult.message,
       constraints: pipelineResult.state.constraints,
@@ -152,7 +178,8 @@ async function decide(req: ChannelRequest): Promise<ChannelResponse> {
 /** SSE 流式决策 */
 async function decideStream(
   req: ChannelRequest,
-  emit: (event: string, data: unknown) => void
+  emit: (event: string, data: unknown) => void,
+  deps: HandlerDependencies,
 ): Promise<void | ChannelResponse> {
   const q = (req.query.q || "").trim();
   if (!q) return badRequest("缺少查询参数 q");
@@ -160,23 +187,67 @@ async function decideStream(
   const segment = req.query.segment as UserSegment | undefined;
   const weather = req.query.weather as WeatherCondition | undefined;
 
-  const traceId = newAgentId("trace");
-  const subscription = defaultRuntimeEventBus.subscribe(traceId);
+  const traceId = deps.createId("trace");
+  const subscription = deps.eventBus.subscribe(traceId);
   try {
     const profile = await resolveRequestProfile(undefined, segment);
-    const session = resolveSession(req, req.query.sessionId);
+    const session = resolveSession(req, req.query.sessionId, deps.createId);
     const submission = createSubmission(
       createAgentInput(q, {
         profile,
         weather,
         parseFn: pickParseFn(),
       }),
-      { ...session, traceId, op: { type: "turn" } },
+      {
+        ...session,
+        traceId,
+        op: { type: "turn" },
+        signal: req.signal,
+      },
     );
-    const runPromise = defaultAgentRuntime.submitSubmission(submission);
+    const runPromise = deps.runtime.submitSubmission(submission);
+    const iterator = subscription[Symbol.asyncIterator]();
+    let submissionResult: SubmissionResult | undefined;
+    let sawFinal = false;
 
-    // SSE 现在消费 Runtime Event，而不是把 Pipeline callback 当作主通信机制。
-    for await (const event of subscription) {
+    while (!sawFinal) {
+      const next = iterator.next().then((value) => ({
+        kind: "event" as const,
+        value,
+      }));
+      const completed = runPromise.then((value) => ({
+        kind: "result" as const,
+        value,
+      }));
+      const settled = await Promise.race([next, completed]);
+
+      if (req.signal?.aborted) {
+        await runPromise;
+        return;
+      }
+
+      if (settled.kind === "result") {
+        submissionResult = settled.value;
+        if (!sawFinal) {
+          emit("error", {
+            message: submissionResult.error ?? "runtime_finished_without_final_event",
+            submissionId: submissionResult.submissionId,
+          });
+          return;
+        }
+        break;
+      }
+
+      if (settled.value.done) {
+        submissionResult = await runPromise;
+        emit("error", {
+          message: submissionResult.error ?? "runtime_event_stream_closed",
+          submissionId: submissionResult.submissionId,
+        });
+        return;
+      }
+
+      const event = settled.value.value;
       if (event.type === "stage_update") {
         const metadata = event.metadata ?? {};
         emit("stage", {
@@ -189,10 +260,18 @@ async function decideStream(
       } else {
         emit("runtime", event);
       }
-      if (event.type === "final") break;
+      sawFinal = event.type === "final";
     }
 
-    const submissionResult = await runPromise;
+    submissionResult ??= await runPromise;
+    if (req.signal?.aborted) return;
+    if (!submissionResult.result || typeof submissionResult.result !== "object") {
+      emit("error", {
+        message: submissionResult.error ?? "runtime_execution_failed",
+        submissionId: submissionResult.submissionId,
+      });
+      return;
+    }
     const result = submissionResult.result as {
       success: boolean;
       message: string;
@@ -201,7 +280,9 @@ async function decideStream(
     metrics.recordDecision(isDegraded(result.state));
     emit("done", {
       submissionId: submissionResult.submissionId,
-      submissionTraceId: traceId,
+      sessionId: submissionResult.sessionId,
+      runId: submissionResult.runId,
+      traceId,
       success: result.success,
       message: result.message,
       decision: result.state.decision,
@@ -209,10 +290,11 @@ async function decideStream(
       notes: result.state.planningNotes ?? [],
     });
   } catch (err) {
-    emit("error", { message: err instanceof Error ? err.message : String(err) });
+    if (!req.signal?.aborted) {
+      emit("error", { message: err instanceof Error ? err.message : String(err) });
+    }
   } finally {
     subscription.close();
-    defaultRuntimeEventBus.closeTrace(traceId);
   }
 }
 
@@ -290,11 +372,23 @@ async function docs(_req: ChannelRequest): Promise<ChannelResponse> {
 // ─── 路由表 ────────────────────────────────────────────
 
 /** 全部 Channel 路由（adapter 据此绑定具体协议） */
-export function buildChannelRoutes(): ChannelRoute[] {
+export function buildChannelRoutes(
+  deps: HandlerDependencies = DEFAULT_DEPENDENCIES,
+): ChannelRoute[] {
   return [
     { method: "GET", path: "/health", handler: health, summary: "健康检查" },
-    { method: "POST", path: "/api/decide", handler: decide, summary: "同步决策" },
-    { method: "GET", path: "/api/decide/stream", stream: decideStream, summary: "SSE 流式决策" },
+    {
+      method: "POST",
+      path: "/api/decide",
+      handler: (req) => decide(req, deps),
+      summary: "同步决策",
+    },
+    {
+      method: "GET",
+      path: "/api/decide/stream",
+      stream: (req, emit) => decideStream(req, emit, deps),
+      summary: "SSE 流式决策",
+    },
     { method: "GET", path: "/api/segments", handler: segments, summary: "分层列表" },
     { method: "GET", path: "/api/profiles", handler: listProfiles, summary: "画像列表" },
     { method: "POST", path: "/api/profiles", handler: upsertProfile, summary: "创建画像" },

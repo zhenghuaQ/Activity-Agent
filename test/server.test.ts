@@ -54,6 +54,10 @@ describe("POST /api/decide", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.success).toBe(true);
+    expect(body.submissionId).toBeTruthy();
+    expect(body.sessionId).toBeTruthy();
+    expect(body.runId).toBeTruthy();
+    expect(body.traceId).toBeTruthy();
     expect(body.decision).toBeDefined();
     expect(body.decision.recommended.objective).toBe("balanced");
     expect(body.selectedPlan.score.dimensions).toHaveLength(6);

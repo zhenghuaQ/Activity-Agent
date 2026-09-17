@@ -32,6 +32,8 @@ export interface ChannelRequest {
   headers: Record<string, string | string[] | undefined>;
   /** 客户端标识（IP 等，用于限流/审计） */
   clientIp?: string;
+  /** Aborted when the transport closes before the handler completes. */
+  signal?: AbortSignal;
 }
 
 /** 协议无关的响应（由 adapter 转换回原生回复） */
