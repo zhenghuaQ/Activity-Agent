@@ -92,4 +92,15 @@ describe("runFullPipeline 端到端决策", () => {
       expect(act.crowd!.confidence).toBeGreaterThan(0);
     }
   });
+
+  it("runs the legacy API through ActivityPlanner", async () => {
+    const result = await runFullPipeline("朋友下午逛展", parseIntent);
+    const started = result.agentState.trace.find((event) => event.type === "run_started");
+
+    expect(started?.metadata?.planner).toBe("activity");
+    expect(result.agentState.trace.filter((event) => event.type === "plan_created"))
+      .toHaveLength(1);
+    expect(result.agentState.trace.filter((event) => event.type === "final"))
+      .toHaveLength(1);
+  });
 });

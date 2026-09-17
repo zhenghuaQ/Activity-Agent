@@ -28,6 +28,22 @@ describe("AgentRuntime canonical entry", () => {
 
     const session = sessionStore.get("entry-session");
     expect(session?.messages.length).toBeGreaterThan(0);
+    const pipelineResult = result.result as PlanResult;
+    expect(pipelineResult.agentState.messages[0]).toMatchObject({
+      direction: "inbound",
+      kind: "user_input",
+      runId: pipelineResult.agentState.runId,
+    });
+    expect(pipelineResult.agentState.messages.at(-1)).toMatchObject({
+      direction: "outbound",
+      kind: "decision",
+      runId: pipelineResult.agentState.runId,
+    });
+    expect(pipelineResult.agentState.trace.filter((event) => event.type === "final"))
+      .toHaveLength(1);
+    expect(session?.messages.map((message) => message.id)).toEqual(
+      pipelineResult.agentState.messages.map((message) => message.id),
+    );
 
     runtime.shutdown();
   });

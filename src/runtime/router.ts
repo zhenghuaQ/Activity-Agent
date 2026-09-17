@@ -110,17 +110,6 @@ export class SubmissionRouter {
 
     this.activeRuns.set(runId, active);
 
-    sessionStore.appendMessage(session.id, {
-      ...submission.input,
-      id: submission.input.id,
-      createdAt: submission.input.createdAt,
-      runId,
-      direction: "inbound",
-      kind: "user_input",
-      text: submission.input.content,
-    });
-
-
     try {
       active.status = "running";
       const config = submission.input.config ?? {};

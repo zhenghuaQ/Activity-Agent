@@ -11,7 +11,12 @@
 // Runtime 层通过 ActivityPlanner.run() 调用本模块。
 // ============================================================
 
-import type { AgentState } from "../../spec/agent.js";
+import {
+  inboundUserInput,
+  outboundDecision,
+  type AgentState,
+  type AgentRunStatus,
+} from "../../spec/agent.js";
 import type {
   PlanningState,
   StructuredConstraints,
@@ -37,9 +42,8 @@ import {
   stage3_generateCandidates,
   stage4_feasibilityCheck,
   stage5_selectBest,
-  type PipelineOptions,
-  type PlanResult,
-} from "./engine.js";
+} from "./stages.js";
+import type { PipelineOptions, PlanResult } from "./engine.js";
 
 const log = childLogger("activity-planner");
 
@@ -90,6 +94,40 @@ function stepData(
   }
 }
 
+function finishRun(
+  agentState: AgentState,
+  status: Extract<AgentRunStatus, "completed" | "failed" | "cancelled">,
+  message: string,
+  data?: unknown,
+  metadata: Record<string, unknown> = {},
+): PlanResult {
+  const success = status === "completed";
+  agentState.status = status;
+  agentState.result = {
+    success,
+    message,
+    ...(data !== undefined ? { data } : {}),
+  };
+
+  if (!agentState.messages.some((item) =>
+    item.runId === agentState.runId && item.kind === "decision")) {
+    agentState.messages.push(outboundDecision(success, message, agentState.runId));
+  }
+  if (!agentState.trace.some((event) => event.type === "final")) {
+    appendTraceEvent(agentState, {
+      type: "final",
+      metadata: { success, status, ...metadata },
+    });
+  }
+
+  return {
+    success,
+    state: agentState.planning,
+    message,
+    agentState,
+  };
+}
+
 /**
  * ActivityPlanner 是 Activity 领域唯一的业务编排器。
  * Runtime 负责“何时运行”；这里负责“Activity 任务如何规划”。
@@ -111,6 +149,10 @@ export class ActivityPlanner {
 
     agentState.status = "running";
     agentState.maxReplans ??= this.maxReplans;
+    if (!agentState.messages.some((message) =>
+      message.runId === agentState.runId && message.kind === "user_input")) {
+      agentState.messages.push(inboundUserInput(rawText, agentState.runId));
+    }
 
     appendTraceEvent(agentState, {
       type: "run_started",
@@ -146,21 +188,30 @@ export class ActivityPlanner {
             radiusKm: planning.constraints!.distance.maxKm,
           };
           planning.planRevision ??= 0;
-          return { ...current, planning };
+          current.planning = planning;
+          agentState.planning = planning;
+          return current;
         },
         follow_up_questions: async (current: AgentState) => {
           throwIfAborted(opts.signal);
-          return {
-            ...current,
-            planning: await stage2_followUp(current.planning, undefined, toolExecutor),
-          };
+          const planning = await stage2_followUp(
+            current.planning,
+            undefined,
+            toolExecutor,
+          );
+          current.planning = planning;
+          agentState.planning = planning;
+          return current;
         },
         candidate_generation: async (current: AgentState) => {
           throwIfAborted(opts.signal);
-          return {
-            ...current,
-            planning: await stage3_generateCandidates(current.planning, toolExecutor),
-          };
+          const planning = await stage3_generateCandidates(
+            current.planning,
+            toolExecutor,
+          );
+          current.planning = planning;
+          agentState.planning = planning;
+          return current;
         },
         feasibility_check: async (current: AgentState) => {
           throwIfAborted(opts.signal);
@@ -168,18 +219,22 @@ export class ActivityPlanner {
           const constraintEvaluations = (planning.candidates ?? []).map((candidate) =>
             constraintEngine.evaluatePlan(candidate.plan, planning.constraints!),
           );
-          return { ...current, planning, constraintEvaluations };
+          current.planning = planning;
+          current.constraintEvaluations = constraintEvaluations;
+          agentState.planning = planning;
+          agentState.constraintEvaluations = constraintEvaluations;
+          return current;
         },
         fine_scheduling: async (current: AgentState) => {
           throwIfAborted(opts.signal);
-          return {
-            ...current,
-            planning: await stage5_selectBest(current.planning, {
-              weightOverride,
-              weather: opts.weather,
-              date: opts.date,
-            }),
-          };
+          const planning = await stage5_selectBest(current.planning, {
+            weightOverride,
+            weather: opts.weather,
+            date: opts.date,
+          });
+          current.planning = planning;
+          agentState.planning = planning;
+          return current;
         },
       };
 
@@ -269,54 +324,37 @@ export class ActivityPlanner {
         const message = agentState.replanCount
           ? `方案规划完成（已重规划 ${agentState.replanCount} 次）`
           : "方案规划完成";
-        agentState.status = "completed";
-        agentState.result = { success: true, message, data: state.decision };
-        appendTraceEvent(agentState, {
-          type: "final",
-          metadata: { success: true, replanCount: agentState.replanCount ?? 0 },
-        });
-        return {
-          success: true,
-          state: agentState.planning,
-          message,
+        return finishRun(
           agentState,
-        };
+          "completed",
+          message,
+          state.decision,
+          { replanCount: agentState.replanCount ?? 0 },
+        );
       }
 
       const message = "未能生成满足运行约束的可行方案";
-      agentState.status = "failed";
-      agentState.result = { success: false, message, data: state.decision };
-      appendTraceEvent(agentState, {
-        type: "final",
-        metadata: { success: false, reason: message },
+      return finishRun(agentState, "failed", message, state.decision, {
+        reason: message,
       });
-      return {
-        success: false,
-        state: agentState.planning,
-        message,
-        agentState,
-      };
     } catch (err) {
-      agentState.planning = state;
       const cancelled = opts.signal?.aborted === true;
-      agentState.status = cancelled ? "cancelled" : "failed";
       const message = cancelled
         ? `运行已取消: ${opts.signal?.reason instanceof Error ? opts.signal.reason.message : String(opts.signal?.reason ?? "user_cancelled")}`
         : `规划异常: ${err instanceof Error ? err.message : String(err)}`;
       agentState.errors.push(message);
-      agentState.result = { success: false, message };
       appendTraceEvent(agentState, { type: "error", metadata: { message } });
-      appendTraceEvent(agentState, { type: "final", metadata: { success: false, error: true } });
       log.error(
         { err: err instanceof Error ? err.message : String(err) },
         "Activity Planner 执行异常",
       );
-      return {
-        success: false,
-        state: agentState.planning,
-        message,
+      return finishRun(
         agentState,
-      };
+        cancelled ? "cancelled" : "failed",
+        message,
+        undefined,
+        { error: true },
+      );
     }
   }
 }
