@@ -15,6 +15,7 @@ import {
 
 export type SubmissionId = string;
 export type InputId = string;
+export type SessionRetention = "retained" | "ephemeral";
 
 export interface AgentInput {
   id: InputId;
@@ -43,6 +44,7 @@ export interface Submission {
   sessionId: SessionId;
   traceId: TraceId;
   op: SubmissionOp;
+  sessionRetention: SessionRetention;
   createdAt: number;
   parentSubmissionId?: SubmissionId;
 }
@@ -76,6 +78,7 @@ export function createSubmission(
     traceId?: TraceId;
     op?: SubmissionOp;
     parentSubmissionId?: SubmissionId;
+    sessionRetention?: SessionRetention;
   },
 ): Submission {
   const normalized: AgentInput =
@@ -91,6 +94,7 @@ export function createSubmission(
     sessionId: opts.sessionId,
     traceId: opts.traceId ?? newAgentId("trace"),
     op: opts.op ?? { type: "turn" },
+    sessionRetention: opts.sessionRetention ?? "retained",
     createdAt: Date.now(),
     ...(opts.parentSubmissionId ? { parentSubmissionId: opts.parentSubmissionId } : {}),
   };

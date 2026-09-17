@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { inboundUserInput } from "../spec/agent.js";
 import {
   AgentRuntime,
   InMemorySessionStore,
@@ -18,6 +19,7 @@ describe("submission runtime", () => {
     expect(submission.sessionId).toBe("sess_1");
     expect(submission.traceId).toBe("trace_1");
     expect(submission.op.type).toBe("turn");
+    expect(submission.sessionRetention).toBe("retained");
   });
 
   it("routes non-turn ops without entering the planning pipeline", async () => {
@@ -64,5 +66,30 @@ describe("submission runtime", () => {
     const session = store.getOrCreate("sess_1", "user_1");
     expect(session.messages).toHaveLength(0);
     expect(store.get("sess_1")?.userId).toBe("user_1");
+  });
+
+  it("bounds transcripts and evicts only inactive sessions", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const store = new InMemorySessionStore({
+      maxSessions: 2,
+      idleTtlMs: 100,
+      maxMessagesPerSession: 3,
+    });
+    store.getOrCreate("active");
+    store.getOrCreate("expired");
+    for (const text of ["one", "two", "three", "four"]) {
+      store.appendMessage("active", inboundUserInput(text, "run_active"));
+    }
+    expect(store.get("active")?.messages.map((message) =>
+      message.kind === "user_input" ? message.text : message.kind))
+      .toEqual(["two", "three", "four"]);
+
+    vi.setSystemTime(1_101);
+    store.cleanup(new Set(["active"]), Date.now());
+    expect(store.get("active")).toBeDefined();
+    expect(store.get("expired")).toBeUndefined();
+    expect(store.size()).toBe(1);
+    vi.useRealTimers();
   });
 });

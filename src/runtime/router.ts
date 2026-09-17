@@ -9,13 +9,17 @@ import {
   type RunId,
 } from "../../spec/agent.js";
 import { type PipelineOptions } from "../planner/engine.js";
-import { defaultActivityPlanner } from "../planner/activity-planner.js";
+import {
+  defaultActivityPlanner,
+  type ActivityPlanner,
+} from "../planner/activity-planner.js";
 import {
   createSubmission,
   type AgentInput,
   type Submission,
   type SubmissionResult,
   type SubmissionOp,
+  type SessionRetention,
 } from "./submission.js";
 import {
   defaultSessionStore,
@@ -38,6 +42,7 @@ export interface AgentRuntimeOptions {
   sessionStore?: InMemorySessionStore;
   userId?: string;
   runOptions?: PipelineOptions;
+  planner?: Pick<ActivityPlanner, "run">;
 }
 
 export class SubmissionRouter {
@@ -63,7 +68,13 @@ export class SubmissionRouter {
       };
     }
 
-    return this.getLoop(submission.sessionId).submit(submission);
+    const loop = this.getLoop(submission.sessionId);
+    const result = await loop.submit(submission);
+    await Promise.resolve();
+    if (loop.isIdle() && this.loops.get(submission.sessionId) === loop) {
+      this.loops.delete(submission.sessionId);
+    }
+    return result;
   }
 
   private getLoop(sessionId: string): SessionSubmissionLoop {
@@ -148,7 +159,8 @@ export class SubmissionRouter {
         { rawText: submission.input.content, config: submission.input.config },
         { runId, sessionId: submission.sessionId, traceId: submission.traceId },
       );
-      const pipelineResult = await defaultActivityPlanner.run(agentState, {
+      const planner = this.options.planner ?? defaultActivityPlanner;
+      const pipelineResult = await planner.run(agentState, {
         ...runOptions,
         parseFn,
       });
@@ -185,19 +197,28 @@ export class SubmissionRouter {
       };
     } finally {
       this.activeRuns.delete(runId);
+      if (submission.sessionRetention === "ephemeral") {
+        sessionStore.remove(submission.sessionId);
+      }
+      sessionStore.cleanup(new Set(
+        [...this.activeRuns.values()].map((run) => run.sessionId),
+      ));
     }
   }
 
   private async executeControl(submission: Submission): Promise<SubmissionResult> {
     switch (submission.op.type) {
-      case "inspect_run":
+      case "inspect_run": {
+        const active = this.ownedRun(submission.sessionId, submission.op.runId);
+        if (!active) return this.runNotFound(submission);
         return {
           submissionId: submission.id,
           status: "completed",
           sessionId: submission.sessionId,
           traceId: submission.traceId,
-          result: this.activeRuns.get(submission.op.runId) ?? null,
+          result: active,
         };
+      }
       case "cancel":
         return this.handleCancel(submission, submission.op.runId);
       case "turn":
@@ -207,16 +228,8 @@ export class SubmissionRouter {
   }
 
   private handleCancel(submission: Submission, runId: RunId): SubmissionResult {
-    const active = this.activeRuns.get(runId);
-    if (!active) {
-      return {
-        submissionId: submission.id,
-        status: "rejected",
-        sessionId: submission.sessionId,
-        traceId: submission.traceId,
-        error: "未找到可取消的运行。",
-      };
-    }
+    const active = this.ownedRun(submission.sessionId, runId);
+    if (!active) return this.runNotFound(submission);
 
     active.controller.abort(new Error("cancelled_by_submission"));
     return {
@@ -226,6 +239,21 @@ export class SubmissionRouter {
       sessionId: submission.sessionId,
       traceId: submission.traceId,
       result: { cancelled: true },
+    };
+  }
+
+  private ownedRun(sessionId: string, runId: RunId): ActiveRun | undefined {
+    const active = this.activeRuns.get(runId);
+    return active?.sessionId === sessionId ? active : undefined;
+  }
+
+  private runNotFound(submission: Submission): SubmissionResult {
+    return {
+      submissionId: submission.id,
+      status: "rejected",
+      sessionId: submission.sessionId,
+      traceId: submission.traceId,
+      error: "未找到可控制的运行。",
     };
   }
 
@@ -255,6 +283,7 @@ export class AgentRuntime {
       traceId?: string;
       op?: SubmissionOp;
       parentSubmissionId?: string;
+      sessionRetention?: SessionRetention;
     },
   ): Promise<SubmissionResult> {
     const submission = createSubmission(input, opts);

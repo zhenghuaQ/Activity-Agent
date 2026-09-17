@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { AgentState } from "../spec/agent.js";
+import type { PlanResult } from "../src/planner/engine.js";
 import {
   AgentRuntime,
   createAgentInput,
@@ -59,6 +61,59 @@ describe("AgentRuntime canonical entry", () => {
     expect(result.status).toBe("completed");
     expect(result.runId).toBeUndefined();
 
+    runtime.shutdown();
+  });
+
+  it("releases an ephemeral session after its turn completes", async () => {
+    const sessionStore = new InMemorySessionStore();
+    const runtime = new AgentRuntime({ sessionStore });
+
+    const result = await runtime.submit("朋友4人下午聚会逛展吃饭", {
+      sessionId: "ephemeral-session",
+      sessionRetention: "ephemeral",
+    });
+
+    expect(result.runId).toBeTruthy();
+    expect(sessionStore.get("ephemeral-session")).toBeUndefined();
+    runtime.shutdown();
+  });
+
+  it("rejects inspect and cancel from a foreign session", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let announceRun!: (runId: string) => void;
+    const started = new Promise<string>((resolve) => { announceRun = resolve; });
+    const planner = {
+      run: vi.fn(async (state: AgentState): Promise<PlanResult> => {
+        announceRun(state.runId);
+        await gate;
+        state.status = "failed";
+        state.result = { success: false, message: "fixture released" };
+        return {
+          success: false,
+          state: state.planning,
+          message: "fixture released",
+          agentState: state,
+        };
+      }),
+    };
+    const runtime = new AgentRuntime({ planner });
+    const activeTurn = runtime.submit("one", { sessionId: "session_a" });
+    const runId = await started;
+
+    const inspect = await runtime.submit("inspect", {
+      sessionId: "session_b",
+      op: { type: "inspect_run", runId },
+    });
+    const cancel = await runtime.submit("cancel", {
+      sessionId: "session_b",
+      op: { type: "cancel", runId },
+    });
+
+    expect(inspect).toMatchObject({ status: "rejected", error: "未找到可控制的运行。" });
+    expect(cancel).toMatchObject({ status: "rejected", error: "未找到可控制的运行。" });
+    release();
+    await activeTurn;
     runtime.shutdown();
   });
 });

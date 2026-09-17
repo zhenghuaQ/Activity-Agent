@@ -75,11 +75,14 @@ function badRequest(message: string): ChannelResponse {
 }
 
 /** HTTP Channel 提供可选的 Session ID；未提供时为本次请求创建独立会话，避免不同用户共享默认 Session。 */
-function resolveSessionId(
+function resolveSession(
   req: ChannelRequest,
   explicit?: string,
-): string {
-  return explicit?.trim() || req.headers["x-session-id"]?.toString().trim() || newAgentId("sess");
+): { sessionId: string; sessionRetention: "retained" | "ephemeral" } {
+  const supplied = explicit?.trim() || req.headers["x-session-id"]?.toString().trim();
+  return supplied
+    ? { sessionId: supplied, sessionRetention: "retained" }
+    : { sessionId: newAgentId("sess"), sessionRetention: "ephemeral" };
 }
 
 // ─── 处理器 ────────────────────────────────────────────
@@ -106,7 +109,7 @@ async function decide(req: ChannelRequest): Promise<ChannelResponse> {
     return badRequest("缺少 text");
   }
   const profile = await resolveRequestProfile(body.profileId, body.segment);
-  const sessionId = resolveSessionId(req, body.sessionId);
+  const session = resolveSession(req, body.sessionId);
   const result = await defaultAgentRuntime.submit(
     createAgentInput(body.text, {
       profile,
@@ -114,7 +117,7 @@ async function decide(req: ChannelRequest): Promise<ChannelResponse> {
       weather: body.weather,
       parseFn: pickParseFn(),
     }),
-    { sessionId, op: { type: "turn" } },
+    { ...session, op: { type: "turn" } },
   );
 
   if (!result.result || typeof result.result !== "object") {
@@ -161,14 +164,14 @@ async function decideStream(
   const subscription = defaultRuntimeEventBus.subscribe(traceId);
   try {
     const profile = await resolveRequestProfile(undefined, segment);
-    const sessionId = resolveSessionId(req, req.query.sessionId);
+    const session = resolveSession(req, req.query.sessionId);
     const submission = createSubmission(
       createAgentInput(q, {
         profile,
         weather,
         parseFn: pickParseFn(),
       }),
-      { sessionId, traceId, op: { type: "turn" } },
+      { ...session, traceId, op: { type: "turn" } },
     );
     const runPromise = defaultAgentRuntime.submitSubmission(submission);
 

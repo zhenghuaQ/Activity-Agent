@@ -70,9 +70,11 @@ export type {
   SubmissionOp,
   SubmissionResult,
   SubmissionStatus,
+  SessionRetention,
 } from "./submission.js";
 
 export { InMemorySessionStore, defaultSessionStore } from "./session.js";
+export type { SessionStoreOptions } from "./session.js";
 export { SessionScheduler, defaultSessionScheduler } from "./scheduler.js";
 export type { SessionConcurrencyPolicy } from "./scheduler.js";
 
