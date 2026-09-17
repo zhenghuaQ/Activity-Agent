@@ -65,9 +65,12 @@ const log = childLogger("planner");
 export async function stage1_parseIntent(
   state: PlanningState,
   rawText: string,
-  parseFn?: (text: string) => StructuredConstraints
+  parseFn?: (text: string) => StructuredConstraints,
+  signal?: AbortSignal,
 ): Promise<PlanningState> {
-  const constraints = parseFn ? parseFn(rawText) : await parseIntentWithLLM(rawText);
+  const constraints = parseFn
+    ? parseFn(rawText)
+    : await parseIntentWithLLM(rawText, signal);
   return {
     ...state,
     stage: "intent_parsing",

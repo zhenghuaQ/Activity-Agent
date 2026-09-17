@@ -28,6 +28,7 @@ import { executePlan } from "../runtime/executor.js";
 import { evaluateAgentState } from "../runtime/evaluator.js";
 import { applyReplanPatch, decideReplan } from "../runtime/replanner.js";
 import { appendTraceEvent } from "../runtime/trace.js";
+import { throwIfAborted } from "../runtime/abort.js";
 import { constraintEngine } from "../constraints/engine.js";
 import { childLogger } from "../core/logger.js";
 import {
@@ -44,12 +45,6 @@ const log = childLogger("activity-planner");
 
 export interface ActivityPlannerOptions {
   maxReplans?: number;
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (!signal?.aborted) return;
-  const reason = signal.reason;
-  throw reason instanceof Error ? reason : new Error(String(reason ?? "run_aborted"));
 }
 
 function applyPersonalization(
@@ -140,7 +135,12 @@ export class ActivityPlanner {
       const handlers = {
         intent_parsing: async (current: AgentState) => {
           throwIfAborted(opts.signal);
-          const planning = await stage1_parseIntent(current.planning, rawText, parseFn);
+          const planning = await stage1_parseIntent(
+            current.planning,
+            rawText,
+            parseFn,
+            opts.signal,
+          );
           weightOverride = applyPersonalization(planning, opts);
           planning.searchPolicy ??= {
             radiusKm: planning.constraints!.distance.maxKm,

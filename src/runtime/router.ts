@@ -284,6 +284,7 @@ export class AgentRuntime {
       op?: SubmissionOp;
       parentSubmissionId?: string;
       sessionRetention?: SessionRetention;
+      signal?: AbortSignal;
     },
   ): Promise<SubmissionResult> {
     const submission = createSubmission(input, opts);

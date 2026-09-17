@@ -45,6 +45,7 @@ export interface Submission {
   traceId: TraceId;
   op: SubmissionOp;
   sessionRetention: SessionRetention;
+  signal?: AbortSignal;
   createdAt: number;
   parentSubmissionId?: SubmissionId;
 }
@@ -79,6 +80,7 @@ export function createSubmission(
     op?: SubmissionOp;
     parentSubmissionId?: SubmissionId;
     sessionRetention?: SessionRetention;
+    signal?: AbortSignal;
   },
 ): Submission {
   const normalized: AgentInput =
@@ -95,6 +97,7 @@ export function createSubmission(
     traceId: opts.traceId ?? newAgentId("trace"),
     op: opts.op ?? { type: "turn" },
     sessionRetention: opts.sessionRetention ?? "retained",
+    ...(opts.signal ? { signal: opts.signal } : {}),
     createdAt: Date.now(),
     ...(opts.parentSubmissionId ? { parentSubmissionId: opts.parentSubmissionId } : {}),
   };

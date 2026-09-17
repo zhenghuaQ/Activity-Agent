@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { MockProvider } from "../src/data/providers/mock-provider.js";
+import { AmapProvider } from "../src/data/providers/amap-provider.js";
 import { HOME } from "../src/data/mock.js";
 import type { GeoLocation } from "../spec/types.js";
 
@@ -34,5 +35,25 @@ describe("MockProvider", () => {
   it("按 id 取餐厅", async () => {
     const r = await mock.getRestaurantById("rest_001");
     expect(r?.name).toContain("望京");
+  });
+
+  it("does not convert cancellation into mock fallback", async () => {
+    const fallback = new MockProvider();
+    const fallbackSearch = vi.spyOn(fallback, "searchAttractions");
+    const fetchMock = vi.fn(async () => {
+      throw new DOMException("aborted", "AbortError");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new AmapProvider({ apiKey: "test-key", fallback });
+    const controller = new AbortController();
+    controller.abort(new Error("user_cancelled"));
+
+    await expect(provider.searchAttractions({
+      origin: { lat: 39.9, lng: 116.4, address: "北京", city: "北京" },
+      radiusKm: 10,
+    }, controller.signal)).rejects.toThrow("user_cancelled");
+    expect(fallbackSearch).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

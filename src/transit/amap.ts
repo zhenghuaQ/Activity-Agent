@@ -12,6 +12,7 @@ import type {
 import { mockEstimateTransit } from "../../spec/transit.js";
 import type { AmapDrivingResponse } from "../../spec/tool-data.js";
 import { childLogger } from "../core/logger.js";
+import { throwIfAborted } from "../runtime/abort.js";
 
 const log = childLogger("transit:amap");
 
@@ -30,6 +31,7 @@ export async function estimateTransitWithAmap(
   departureTime: string,
   signal?: AbortSignal
 ): Promise<TransitEstimate> {
+  throwIfAborted(signal);
   const config = getAmapConfig();
 
   if (!config.enabled) {
@@ -90,6 +92,7 @@ export async function estimateTransitWithAmap(
       totalMinutes: totalMinutes + bufferMinutes,
     };
   } catch (err) {
+    throwIfAborted(signal);
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "高德请求失败，降级 Mock 通勤");
     return mockEstimateTransit(from, to, departureTime);
   }

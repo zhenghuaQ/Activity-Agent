@@ -8,6 +8,7 @@
 
 import type { SessionId } from "../../spec/agent.js";
 import type { Submission, SubmissionResult } from "./submission.js";
+import { linkAbortSignal } from "./abort.js";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -169,7 +170,7 @@ export class SessionSubmissionLoop {
 
   private startTurn(item: QueuedSubmission): void {
     const { submission } = item;
-    const controller = new AbortController();
+    const { controller, dispose } = linkAbortSignal(submission.signal);
     const completion = this.handlers
       .executeTurn(submission, controller)
       .then((result) => item.deferred.resolve(result))
@@ -183,6 +184,7 @@ export class SessionSubmissionLoop {
         });
       })
       .finally(() => {
+        dispose();
         if (this.currentTurn?.submissionId === submission.id) {
           this.currentTurn = undefined;
         }

@@ -18,6 +18,7 @@ import type {
 import type { ToolErrorCode, ToolErrorInfo } from "../../spec/errors.js";
 import { ERROR_CODE_META } from "../../spec/errors.js";
 import { ToolError } from "./errors.js";
+import { throwIfAborted } from "../runtime/abort.js";
 
 /** 裸数据自动转 text 时的截断上限（控制 transcript 体积） */
 const TEXT_TRUNCATE_LIMIT = 6000;
@@ -135,6 +136,7 @@ export abstract class BaseTool<TInput, TOutput> {
         context: { ...res.context, ...baseContext },
       };
     } catch (e) {
+      throwIfAborted(context.signal);
       const info = toErrorInfo(e);
       return {
         status: "error",

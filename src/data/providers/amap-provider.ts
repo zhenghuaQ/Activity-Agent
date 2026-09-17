@@ -22,6 +22,7 @@ import type {
 import { withDistanceFrom } from "../../core/geo.js";
 import { TtlLruCache } from "../../core/cache.js";
 import { childLogger } from "../../core/logger.js";
+import { throwIfAborted } from "../../runtime/abort.js";
 
 const log = childLogger("data:amap");
 
@@ -123,6 +124,7 @@ export class AmapProvider implements DataSource {
   }
 
   async searchAttractions(query: PlaceQuery, signal?: AbortSignal): Promise<Attraction[]> {
+    throwIfAborted(signal);
     try {
       const pois = await this.fetchAround(
         query.origin,
@@ -131,7 +133,7 @@ export class AmapProvider implements DataSource {
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchAttractions(query);
+      if (pois.length === 0) return this.fallback.searchAttractions(query, signal);
 
       const items: Attraction[] = pois.flatMap((p) => {
         const coord = parseLocation(p.location);
@@ -156,11 +158,12 @@ export class AmapProvider implements DataSource {
       });
       return this.applyFeatures(withDistanceFrom(query.origin, items), query);
     } catch (err) {
-      return this.degrade(err, () => this.fallback.searchAttractions(query));
+      return this.degrade(err, signal, () => this.fallback.searchAttractions(query, signal));
     }
   }
 
   async searchRestaurants(query: PlaceQuery, signal?: AbortSignal): Promise<Restaurant[]> {
+    throwIfAborted(signal);
     try {
       const pois = await this.fetchAround(
         query.origin,
@@ -169,7 +172,7 @@ export class AmapProvider implements DataSource {
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchRestaurants(query);
+      if (pois.length === 0) return this.fallback.searchRestaurants(query, signal);
 
       const items: Restaurant[] = pois.flatMap((p) => {
         const coord = parseLocation(p.location);
@@ -197,11 +200,12 @@ export class AmapProvider implements DataSource {
       });
       return this.applyFeatures(withDistanceFrom(query.origin, items), query);
     } catch (err) {
-      return this.degrade(err, () => this.fallback.searchRestaurants(query));
+      return this.degrade(err, signal, () => this.fallback.searchRestaurants(query, signal));
     }
   }
 
   async searchBreakPlaces(query: BreakPlaceQuery, signal?: AbortSignal): Promise<BreakPlace[]> {
+    throwIfAborted(signal);
     try {
       const pois = await this.fetchAround(
         query.origin,
@@ -210,7 +214,7 @@ export class AmapProvider implements DataSource {
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchBreakPlaces(query);
+      if (pois.length === 0) return this.fallback.searchBreakPlaces(query, signal);
 
       const subtype = query.breakSubtype ?? "cafe";
       const items: BreakPlace[] = pois.flatMap((p) => {
@@ -238,7 +242,7 @@ export class AmapProvider implements DataSource {
       const withDist = withDistanceFrom(query.origin, items);
       return this.applyFeatures(withDist, query);
     } catch (err) {
-      return this.degrade(err, () => this.fallback.searchBreakPlaces(query));
+      return this.degrade(err, signal, () => this.fallback.searchBreakPlaces(query, signal));
     }
   }
 
@@ -251,6 +255,7 @@ export class AmapProvider implements DataSource {
   }
 
   async geocode(address: string, signal?: AbortSignal): Promise<GeoLocation | null> {
+    throwIfAborted(signal);
     try {
       return await this.geoCache.wrap(address, async () => {
         const url = new URL(AMAP_GEOCODE);
@@ -274,6 +279,7 @@ export class AmapProvider implements DataSource {
         };
       });
     } catch (err) {
+      throwIfAborted(signal);
       log.warn({ err: err instanceof Error ? err.message : String(err) }, "高德地理编码失败，降级");
       return this.fallback.geocode(address, signal);
     }
@@ -292,7 +298,12 @@ export class AmapProvider implements DataSource {
     return query.limit ? out.slice(0, query.limit) : out;
   }
 
-  private degrade<T>(err: unknown, fallback: () => Promise<T>): Promise<T> {
+  private degrade<T>(
+    err: unknown,
+    signal: AbortSignal | undefined,
+    fallback: () => Promise<T>,
+  ): Promise<T> {
+    throwIfAborted(signal);
     log.warn(
       { err: err instanceof Error ? err.message : String(err) },
       "高德请求异常，降级 Mock"

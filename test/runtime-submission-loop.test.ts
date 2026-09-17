@@ -118,4 +118,43 @@ describe("session submission loop", () => {
     expect(events).toEqual(["start:one", "end:one", "start:two", "end:two"]);
     loop.stop();
   });
+
+  it("links an external submission signal to the active turn", async () => {
+    const external = new AbortController();
+    const loop = createSessionSubmissionLoop("sess_external_cancel", {
+      executeTurn: async (submission, controller) => {
+        await new Promise<void>((resolve) => {
+          if (controller.signal.aborted) resolve();
+          else controller.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return {
+          submissionId: submission.id,
+          status: "failed",
+          sessionId: submission.sessionId,
+          traceId: submission.traceId,
+          error: controller.signal.reason instanceof Error
+            ? controller.signal.reason.message
+            : String(controller.signal.reason),
+        };
+      },
+      executeControl: async (submission) => ({
+        submissionId: submission.id,
+        status: "completed",
+        sessionId: submission.sessionId,
+        traceId: submission.traceId,
+      }),
+    });
+    const turn = loop.submit(createSubmission("cancel me", {
+      sessionId: "sess_external_cancel",
+      signal: external.signal,
+    }));
+
+    external.abort(new Error("transport_closed"));
+
+    await expect(turn).resolves.toMatchObject({
+      status: "failed",
+      error: "transport_closed",
+    });
+    loop.stop();
+  });
 });

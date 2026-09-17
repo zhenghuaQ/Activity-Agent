@@ -9,10 +9,10 @@ import type {
   Scenario,
 } from "../../spec/types.js";
 import { getLLMClient, getLLMConfig } from "./config.js";
-import type OpenAI from "openai";
 import { HOME } from "../data/mock.js";
 import { parseIntent as mockParse } from "../intent/parser.js";
 import { childLogger } from "../core/logger.js";
+import { throwIfAborted } from "../runtime/abort.js";
 
 const log = childLogger("llm:intent");
 
@@ -126,7 +126,11 @@ interface LLMIntentResult {
 /**
  * 试用 LLM 解析意图，失败时降级为 Mock 关键词匹配。
  */
-export async function parseIntentWithLLM(rawText: string): Promise<StructuredConstraints> {
+export async function parseIntentWithLLM(
+  rawText: string,
+  signal?: AbortSignal,
+): Promise<StructuredConstraints> {
+  throwIfAborted(signal);
   const client = getLLMClient();
   const config = getLLMConfig();
 
@@ -159,7 +163,7 @@ export async function parseIntentWithLLM(rawText: string): Promise<StructuredCon
       tool_choice: { type: "function", function: { name: "extract_activity_intent" } },
       temperature: 0.1,
       max_tokens: 500,
-    });
+    }, signal ? { signal } : undefined);
 
     const toolCall = resp.choices[0]?.message?.tool_calls?.[0];
     if (!toolCall || toolCall.type !== "function") {
@@ -182,6 +186,7 @@ export async function parseIntentWithLLM(rawText: string): Promise<StructuredCon
 
     return llmResultToConstraints(parsed);
   } catch (err) {
+    throwIfAborted(signal);
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "LLM 解析异常，降级 Mock");
     return mockParse(rawText);
   }

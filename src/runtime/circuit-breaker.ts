@@ -7,6 +7,7 @@
 // ============================================================
 
 export type CircuitState = "closed" | "open" | "half_open";
+export type CircuitOutcome = "success" | "upstream_failure" | "neutral";
 
 export interface CircuitStatus {
   state: CircuitState;
@@ -80,6 +81,21 @@ export class CircuitBreakerRegistry {
     status.consecutiveFailures += 1;
     if (status.consecutiveFailures >= this.failureThreshold) {
       this.open(status, now);
+    }
+  }
+
+  completeCall(
+    toolName: string,
+    outcome: CircuitOutcome,
+    now = Date.now(),
+  ): void {
+    const status = this.getOrCreate(toolName);
+    status.halfOpenProbeInFlight = false;
+
+    if (outcome === "success") {
+      this.recordSuccess(toolName);
+    } else if (outcome === "upstream_failure") {
+      this.recordFailure(toolName, now);
     }
   }
 

@@ -15,7 +15,12 @@ import type { ToolErrorCode } from "../../spec/errors.js";
 import { ERROR_CODE_META } from "../../spec/errors.js";
 import { toolRegistry } from "../tools/registry.js";
 import { appendTraceEvent } from "./trace.js";
-import { defaultCircuitBreakerRegistry, CircuitBreakerRegistry } from "./circuit-breaker.js";
+import {
+  defaultCircuitBreakerRegistry,
+  CircuitBreakerRegistry,
+  type CircuitOutcome,
+} from "./circuit-breaker.js";
+import { linkAbortSignal, throwIfAborted } from "./abort.js";
 
 export type ToolFailureKind =
   | "not_found"
@@ -275,141 +280,170 @@ export class ToolExecutor {
       return response;
     }
 
-    const tool = registry.get(toolName);
-    if (!tool) {
-      const failure = classifyFailure(
-        "E_RESOURCE_NOT_FOUND",
-        `未找到工具: ${toolName}`,
-      );
-      const response = errorResponse<TOutput>(
-        failure.code,
-        toolName,
-        input,
-        failure.message,
-        Date.now(),
-        0,
-      );
-      recordToolCall(this.state, toolName, input, response, 1, undefined, failure);
-      // Tool not found 是配置/参数问题，不计入熔断器。
-      return response;
-    }
-
-    const maxRetries = Math.max(0, this.options.maxRetries ?? 0);
-    let lastFailure: ToolFailure | undefined;
-    let lastResponse: ToolResponse<TOutput> | undefined;
-
-    for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
-      const startedAt = Date.now();
-      const controller = new AbortController();
-      const parentSignal = this.options.signal;
-      const onParentAbort = () => controller.abort(parentSignal?.reason);
-      parentSignal?.addEventListener("abort", onParentAbort, { once: true });
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-
-      const execution = tool.execute(input, { signal: controller.signal }) as Promise<ToolResponse<TOutput>>;
-
-      const timeoutPromise = this.options.timeoutMs !== undefined
-        ? new Promise<ToolResponse<TOutput>>((resolve) => {
-            timeoutHandle = setTimeout(() => {
-              controller.abort();
-              resolve(timeoutResponse<TOutput>(toolName, input, startedAt));
-            }, this.options.timeoutMs);
-          })
-        : undefined;
-
-      const response = timeoutPromise ? await Promise.race([execution, timeoutPromise]) : await execution;
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      parentSignal?.removeEventListener("abort", onParentAbort);
-
-      lastResponse = response;
-
-      if (response.status !== "error") {
-        recordToolCall(this.state, toolName, input, response, attempt);
-        breaker.recordSuccess(toolName);
+    let outcome: CircuitOutcome = "neutral";
+    try {
+      const tool = registry.get(toolName);
+      if (!tool) {
+        const failure = classifyFailure(
+          "E_RESOURCE_NOT_FOUND",
+          `未找到工具: ${toolName}`,
+        );
+        const response = errorResponse<TOutput>(
+          failure.code,
+          toolName,
+          input,
+          failure.message,
+          Date.now(),
+          0,
+        );
+        recordToolCall(this.state, toolName, input, response, 1, undefined, failure);
         return response;
       }
 
-      lastFailure = classifyFailure(response.errorInfo.code, response.errorInfo.message);
+      const maxRetries = Math.max(0, this.options.maxRetries ?? 0);
+      let lastFailure: ToolFailure | undefined;
+      let lastResponse: ToolResponse<TOutput> | undefined;
 
-      const canRetry = lastFailure.retryable && attempt <= maxRetries;
-      const fallbackCodes = this.options.fallbackOn ?? DEFAULT_FALLBACK_CODES;
-      const canFallback =
-        !canRetry &&
-        fallbackCodes.includes(lastFailure.code) &&
-        Boolean(this.options.fallbacks?.[toolName]);
+      for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+        const startedAt = Date.now();
+        const parentSignal = this.options.signal;
+        const { controller, dispose } = linkAbortSignal(parentSignal);
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        let timedOut = false;
+        let response: ToolResponse<TOutput>;
 
-      recordToolCall(
-        this.state,
-        toolName,
-        input,
-        response,
-        attempt,
-        canRetry ? "retry" : undefined,
-        lastFailure,
-      );
+        try {
+          const execution = tool.execute(input, {
+            signal: controller.signal,
+          }) as Promise<ToolResponse<TOutput>>;
+          const timeoutPromise = this.options.timeoutMs !== undefined
+            ? new Promise<ToolResponse<TOutput>>((resolve) => {
+                timeoutHandle = setTimeout(() => {
+                  timedOut = true;
+                  resolve(timeoutResponse<TOutput>(toolName, input, startedAt));
+                  controller.abort(new Error("tool_timeout"));
+                }, this.options.timeoutMs);
+              })
+            : undefined;
 
-      if (canRetry) {
-        appendTraceEvent(this.state, {
-          type: "error",
-          toolName,
-          metadata: { phase: "tool_retry", attempt, nextAttempt: attempt + 1, failure: lastFailure },
-        });
-        continue;
-      }
+          try {
+            response = timeoutPromise
+              ? await Promise.race([execution, timeoutPromise])
+              : await execution;
+          } catch (error) {
+            throwIfAborted(parentSignal);
+            response = timedOut
+              ? timeoutResponse<TOutput>(toolName, input, startedAt)
+              : errorResponse<TOutput>(
+                  "E_EXECUTION_FAILED",
+                  toolName,
+                  input,
+                  error instanceof Error ? error.message : String(error),
+                  startedAt,
+                );
+          }
+          throwIfAborted(parentSignal);
+        } finally {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          dispose();
+        }
 
-      // 只有一次“逻辑调用”最终失败时才给熔断器记一次失败，避免 retry 放大计数。
-      if (lastFailure.retryable) {
-        breaker.recordFailure(toolName);
-      }
+        lastResponse = response;
 
-      if (canFallback) {
-        appendTraceEvent(this.state, {
-          type: "error",
-          toolName,
-          metadata: { phase: "tool_fallback", attempt, failure: lastFailure },
-        });
+        if (response.status !== "error") {
+          recordToolCall(this.state, toolName, input, response, attempt);
+          outcome = "success";
+          return response;
+        }
 
-        const fallbackResponse = await this.options.fallbacks![toolName]({
-          toolName,
-          input,
-          failure: lastFailure,
-          state: this.state,
-          attempt,
-        });
+        lastFailure = classifyFailure(response.errorInfo.code, response.errorInfo.message);
+        const canRetry = lastFailure.retryable && attempt <= maxRetries;
+        const fallbackCodes = this.options.fallbackOn ?? DEFAULT_FALLBACK_CODES;
+        const canFallback =
+          !canRetry
+          && fallbackCodes.includes(lastFailure.code)
+          && Boolean(this.options.fallbacks?.[toolName]);
 
         recordToolCall(
           this.state,
           toolName,
           input,
-          fallbackResponse,
+          response,
           attempt,
-          "fallback",
-          fallbackResponse.status === "error"
-            ? classifyFailure(fallbackResponse.errorInfo.code, fallbackResponse.errorInfo.message)
-            : undefined,
+          canRetry ? "retry" : undefined,
+          lastFailure,
         );
 
-        appendTraceEvent(this.state, {
-          type: "tool_result",
-          toolName,
-          metadata: { recovery: "fallback", recovered: fallbackResponse.status !== "error" },
-        });
+        if (canRetry) {
+          appendTraceEvent(this.state, {
+            type: "error",
+            toolName,
+            metadata: {
+              phase: "tool_retry",
+              attempt,
+              nextAttempt: attempt + 1,
+              failure: lastFailure,
+            },
+          });
+          continue;
+        }
 
-        return fallbackResponse as ToolResponse<TOutput>;
+        outcome = lastFailure.retryable ? "upstream_failure" : "neutral";
+        if (canFallback) {
+          appendTraceEvent(this.state, {
+            type: "error",
+            toolName,
+            metadata: { phase: "tool_fallback", attempt, failure: lastFailure },
+          });
+
+          const fallbackResponse = await this.options.fallbacks![toolName]({
+            toolName,
+            input,
+            failure: lastFailure,
+            state: this.state,
+            attempt,
+          });
+
+          recordToolCall(
+            this.state,
+            toolName,
+            input,
+            fallbackResponse,
+            attempt,
+            "fallback",
+            fallbackResponse.status === "error"
+              ? classifyFailure(
+                  fallbackResponse.errorInfo.code,
+                  fallbackResponse.errorInfo.message,
+                )
+              : undefined,
+          );
+          appendTraceEvent(this.state, {
+            type: "tool_result",
+            toolName,
+            metadata: {
+              recovery: "fallback",
+              recovered: fallbackResponse.status !== "error",
+            },
+          });
+          return fallbackResponse as ToolResponse<TOutput>;
+        }
+
+        return response;
       }
 
-      return response;
+      if (lastResponse) return lastResponse;
+      return errorResponse<TOutput>(
+        lastFailure?.code ?? "E_EXECUTION_FAILED",
+        toolName,
+        input,
+        lastFailure?.message ?? ERROR_CODE_META.E_EXECUTION_FAILED.defaultMessage,
+        Date.now(),
+        0,
+      );
+    } finally {
+      breaker.completeCall(toolName, outcome);
     }
-
-    if (lastResponse) return lastResponse;
-    return errorResponse<TOutput>(
-      lastFailure?.code ?? "E_EXECUTION_FAILED",
-      toolName,
-      input,
-      lastFailure?.message ?? ERROR_CODE_META.E_EXECUTION_FAILED.defaultMessage,
-      Date.now(),
-      0,
-    );
   }
 }
 

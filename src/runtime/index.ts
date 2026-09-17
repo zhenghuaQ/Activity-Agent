@@ -49,7 +49,12 @@ export type { EventSubscription, RuntimeEventBus } from "./event-bus.js";
 export type { TraceCollector, TraceEvent, TraceEventType } from "./trace.js";
 
 export { CircuitBreakerRegistry, defaultCircuitBreakerRegistry } from "./circuit-breaker.js";
-export type { CircuitBreakerOptions, CircuitState, CircuitStatus } from "./circuit-breaker.js";
+export type {
+  CircuitBreakerOptions,
+  CircuitOutcome,
+  CircuitState,
+  CircuitStatus,
+} from "./circuit-breaker.js";
 
 export {
   AgentRuntime,
@@ -80,3 +85,5 @@ export type { SessionConcurrencyPolicy } from "./scheduler.js";
 
 export { SessionSubmissionLoop, createSessionSubmissionLoop } from "./submission-loop.js";
 export type { SubmissionLoopHandlers } from "./submission-loop.js";
+
+export { linkAbortSignal, throwIfAborted } from "./abort.js";

@@ -8,6 +8,7 @@
 import type { FollowUpQuestion, StructuredConstraints } from "../../spec/types.js";
 import { getLLMClient, getLLMConfig } from "./config.js";
 import { childLogger } from "../core/logger.js";
+import { throwIfAborted } from "../runtime/abort.js";
 
 const log = childLogger("llm:followup");
 
@@ -51,6 +52,7 @@ export async function generateFollowUpWithLLM(
   constraints: StructuredConstraints,
   signal?: AbortSignal
 ): Promise<FollowUpQuestion[]> {
+  throwIfAborted(signal);
   const client = getLLMClient();
   const config = getLLMConfig();
 
@@ -105,6 +107,7 @@ export async function generateFollowUpWithLLM(
     log.info({ count: questions.length }, "追问生成完成");
     return questions;
   } catch (err) {
+    throwIfAborted(signal);
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "追问生成失败，使用模板");
     return [];
   }
