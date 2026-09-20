@@ -12,7 +12,7 @@
 
 import type { FollowUpAnswer, FollowUpQuestion, PlanningState } from "./types.js";
 import type { RuntimePlan } from "../src/runtime/plan.js";
-import type { TraceEvent } from "../src/runtime/trace.js";
+import type { AgentEvent } from "./agent-event.js";
 
 // ─── 标识 ──────────────────────────────────────────────
 
@@ -240,7 +240,7 @@ export interface AgentState {
   /** 任务输入 */
   input: AgentRunInput;
   /** 运行状态 */
-  status: AgentRunStatus;
+  readonly status: AgentRunStatus;
   /** 当前执行步骤（步骤名/ID，v1 为字符串） */
   currentStep?: AgentStepRef;
   /** 本次 Run 的显式 Runtime Plan（初期由默认 Activity Plan 提供） */
@@ -251,8 +251,8 @@ export interface AgentState {
   messages: AgentMessage[];
   /** 工具调用记录（按调用顺序） */
   toolCalls: AgentToolCall[];
-  /** Runtime Trace 事件（按发生顺序） */
-  trace: TraceEvent[];
+  /** Agent 领域事件（按 sequence 顺序） */
+  trace: AgentEvent[];
   /** 最近一次候选/方案约束评估结果（Runtime 侧记录，不决定领域过滤策略） */
   constraintEvaluations?: import("../src/constraints/engine.js").ConstraintEvaluation[];
   /** 受控重规划计数，用于防止 Agent Loop 无限循环 */

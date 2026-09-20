@@ -1,6 +1,6 @@
 // ============================================================
 // src/tools/followup.ts — Tool 6: generate_followup_questions
-// v2: LLM 优先 + Mock 降级
+// 可执行问题目录 + LLM 文案润色（失败时保留模板）
 // ============================================================
 
 import type { FollowUpQuestion, LeadRole, StructuredConstraints } from "../../spec/types.js";
@@ -9,6 +9,7 @@ import type * as T from "../../spec/tools.js";
 import { GENERATE_FOLLOWUP_TOOL } from "../../spec/tools.js";
 import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { generateFollowUpWithLLM } from "../llm/followup.js";
+import { BUDGET_TARGET } from "../decision/constants.js";
 
 export class GenerateFollowUpTool extends BaseTool<
   T.GenerateFollowUpInput,
@@ -24,52 +25,44 @@ export class GenerateFollowUpTool extends BaseTool<
 
     if (!strategy.needsFollowUp) return [];
 
-    // 尝试 LLM 生成；未配置/失败时返回 []，降级为硬编码追问
-    const llmResult = await generateFollowUpWithLLM(input.constraints, context?.signal);
-    if (llmResult.length > 0) {
-      return llmResult;
-    }
-
-    // 降级为硬编码追问
-    return this.mockFollowUp(group.leadRole, group);
+    // 只展示已有确定约束映射的问题。LLM 仅润色问题，不决定字段、选项或补丁。
+    const catalog = this.questionCatalog(group.leadRole, input.constraints);
+    if (!catalog.length) return [];
+    const llmResult = await generateFollowUpWithLLM(input.constraints, context?.signal, catalog);
+    return catalog.map(q => {
+      const wording = llmResult.find(item => item.id === q.id);
+      return wording && typeof wording.question === "string" && wording.question.trim() && wording.question.length <= 200
+        ? { ...q, question: wording.question } : q;
+    });
   }
 
-  private mockFollowUp(leadRole: LeadRole, group: StructuredConstraints["group"]): FollowUpQuestion[] {
+  private questionCatalog(leadRole: LeadRole, constraints: StructuredConstraints): FollowUpQuestion[] {
+    const group = constraints.group;
     const questions: FollowUpQuestion[] = [];
 
-    if (leadRole === "kids") {
+    if (!constraints.extraHints.length && !group.preferences.preferredCuisine?.length) {
       questions.push({
-        id: "kids_age_tolerance",
-        question: "孩子多大？有什么特别需要注意的吗？",
-        reason: "5岁以下和10岁以上玩的差别很大，需要确认",
+        id: "trip_style",
+        question: "这次更想要哪种旅行节奏？",
+        reason: "先选一个方向，后续仍可随时补充或修改",
         options: [
-          { label: "5岁以下（推荐）", value: "under5", hint: "亲子乐园、室内游乐、儿童餐厅" },
-          { label: "5-10岁", value: "age5_10", hint: "科技馆、动物园、户外探索" },
-          { label: "10-15岁", value: "age10_15", hint: "卡丁车、攀岩、VR体验" },
+          { label: "经典城市游", value: "city_classic", hint: "地标与历史文化" },
+          { label: "美食约会", value: "food_date", hint: "美食与氛围体验" },
+          { label: "休闲慢游", value: "slow_travel", hint: "少赶路、留出自由时间" },
         ],
         type: "single_choice",
       });
     }
 
-    if (leadRole === "elderly") {
+    if (leadRole === "elderly" || leadRole === "mixed_family") {
       questions.push({
         id: "elderly_dietary",
         question: "老人有什么饮食忌口吗？",
         reason: "老年人通常需要少油盐、软食，想确认一下",
         options: [
-          { label: "少油少盐即可", value: "light", hint: "推荐清淡本地菜" },
-          { label: "需要软食/易消化", value: "soft", hint: "推荐粥品、蒸菜" },
-          { label: "无特殊要求", value: "none", hint: "按正常口味推荐" },
-        ],
-        type: "single_choice",
-      });
-      questions.push({
-        id: "elderly_mobility",
-        question: "老人行动方便吗？",
-        reason: "决定景点是否需要无障碍设施和休息频率",
-        options: [
-          { label: "行动自如（推荐）", value: "mobile", hint: "续航充足，每日1-2个景点" },
-          { label: "需要轮椅/拐杖", value: "limited", hint: "只选有电梯、平路的室内景点" },
+          { label: "少油少盐即可", value: "light", hint: "筛选支持饮食定制的餐厅，少油盐需向商家确认" },
+          { label: "需要软食/易消化", value: "soft", hint: "记录软食需求并筛选支持定制的餐厅，具体菜品需确认" },
+          { label: "无额外要求", value: "none", hint: "不增加限制，保留你已说明的忌口" },
         ],
         type: "single_choice",
       });
@@ -82,8 +75,8 @@ export class GenerateFollowUpTool extends BaseTool<
         reason: "不同阶段对饮食要求不同",
         options: [
           { label: "轻食低卡就行（推荐）", value: "light_lowcal", hint: "正常吃但选健康餐" },
-          { label: "严格控卡", value: "strict", hint: "只推沙拉/轻食专门店，避开煎炸" },
-          { label: "偶尔放纵", value: "cheat_day", hint: "减肥是认真的，但今天是Cheat Day！" },
+          { label: "严格控卡", value: "strict", hint: "只选同时有轻食、低卡标签的餐厅；实际热量需确认" },
+          { label: "偶尔放纵", value: "cheat_day", hint: "今天不按减脂偏好筛选，仍保留已说明的忌口" },
         ],
         type: "single_choice",
       });
@@ -93,11 +86,11 @@ export class GenerateFollowUpTool extends BaseTool<
       questions.push({
         id: "budget",
         question: "今天的预算大概多少？",
-        reason: "帮你控制在预算内安排",
+        reason: "预算作为方案评分偏好，不是价格保证或强制上限",
         options: [
-          { label: "人均100以内", value: "low", hint: "性价比优先，大众消费" },
-          { label: "人均100-200（推荐）", value: "medium", hint: "品质不错的餐厅+热门景点" },
-          { label: "人均200以上", value: "high", hint: "精致餐饮+VIP体验" },
+          { label: `节约（参考人均${BUDGET_TARGET.low}元）`, value: "low", hint: "性价比优先" },
+          { label: `适中（参考人均${BUDGET_TARGET.medium}元）`, value: "medium", hint: "平衡花费与体验" },
+          { label: `充裕（参考人均${BUDGET_TARGET.high}元）`, value: "high", hint: "接受更高花费" },
         ],
         type: "single_choice",
       });

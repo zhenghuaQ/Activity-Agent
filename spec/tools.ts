@@ -17,6 +17,12 @@ import type {
   Restaurant,
   TimeWindow,
 } from "./types.js";
+import type { DestinationQuery, SearchArea } from "./datasource.js";
+
+// ─── Tool: resolve_destination ─────────────────────────
+
+export interface ResolveDestinationInput { destination: DestinationQuery }
+export type ResolveDestinationOutput = SearchArea;
 
 // ─── Tool 0: get_user_location ─────────────────────────
 // 🆕 获取用户真实定位（Mock → 真实API）
@@ -35,6 +41,8 @@ export interface SearchAttractionsInput {
   crowdTags: CrowdTag[];
   timeWindow: TimeWindow;
   distance: DistanceConstraint;
+  destination?: DestinationQuery;
+  searchArea?: SearchArea;
   keywords?: string[];
   /** 🆕 当地特色标签 */
   localFeatures?: LocalFeatureTag[];
@@ -49,7 +57,11 @@ export interface SearchRestaurantsInput {
   group: Group;
   timeWindow: TimeWindow;
   distance: DistanceConstraint;
+  destination?: DestinationQuery;
+  searchArea?: SearchArea;
   preferenceTags?: string[];
+  /** 偏好菜系用于排序；没有匹配项时不清空候选。 */
+  preferredCuisine?: string[];
   /** 🆕 忌口关键词 */
   dietaryRestrictions?: string[];
   /** 🆕 当地特色标签 */
@@ -69,6 +81,8 @@ export interface SearchBreakPlacesInput {
   /** 是否有幼年儿童 */
   hasYoungChildren: boolean;
   distance: DistanceConstraint;
+  destination?: DestinationQuery;
+  searchArea?: SearchArea;
   /** 期望的时间段 */
   afterTime: string;
 }
@@ -228,6 +242,32 @@ const distanceSchema: JsonSchemaObject = {
   required: ["maxKm", "homeLocation"],
 };
 
+const destinationSchema: JsonSchemaObject = {
+  type: "object",
+  description: "用户明确指定的旅行目的地",
+  properties: {
+    city: { type: "string" },
+    district: { type: "string" },
+  },
+  required: ["city"],
+};
+
+const searchAreaSchema: JsonSchemaObject = {
+  type: "object",
+  description: "Provider 已解析的实际检索区域",
+  properties: {
+    destination: destinationSchema,
+    center: {
+      type: "object", properties: { lat: { type: "number" }, lng: { type: "number" },
+        address: { type: "string" }, city: { type: "string" }, district: { type: "string" } },
+      required: ["lat", "lng", "address", "city"],
+    },
+    providerAreaId: { type: "string" },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+  required: ["destination", "center", "confidence"],
+};
+
 const groupSchema: JsonSchemaObject = {
   type: "object",
   description: "出行人群信息（意图解析产出，通常直接透传）",
@@ -267,6 +307,7 @@ const constraintsSchema: JsonSchemaObject = {
   type: "object",
   description: "结构化出行约束（意图解析的产物）",
   properties: {
+    destination: destinationSchema,
     group: groupSchema,
     timeWindow: timeWindowSchema,
     distance: distanceSchema,
@@ -275,7 +316,12 @@ const constraintsSchema: JsonSchemaObject = {
   required: ["group", "timeWindow", "distance"],
 };
 
-// ─── 8 个工具的 LLM 接口定义 ────────────────────────────
+export const RESOLVE_DESTINATION_TOOL: LLMToolDefinition = {
+  description: "将城市/行政区目的地解析为 Provider 可检索的中心点。无法覆盖该城市时必须明确失败，不能换成其他城市。",
+  inputSchema: { type: "object", properties: { destination: destinationSchema }, required: ["destination"] },
+};
+
+// ─── Tool 的 LLM 接口定义 ───────────────────────────────
 
 export const GET_USER_LOCATION_TOOL: LLMToolDefinition = {
   description:
@@ -301,6 +347,8 @@ export const SEARCH_ATTRACTIONS_TOOL: LLMToolDefinition = {
       },
       timeWindow: timeWindowSchema,
       distance: distanceSchema,
+      destination: destinationSchema,
+      searchArea: searchAreaSchema,
       keywords: { type: "array", items: { type: "string" }, description: "关键词（可选）" },
       localFeatures: {
         type: "array",
@@ -321,10 +369,17 @@ export const SEARCH_RESTAURANTS_TOOL: LLMToolDefinition = {
       group: groupSchema,
       timeWindow: timeWindowSchema,
       distance: distanceSchema,
+      destination: destinationSchema,
+      searchArea: searchAreaSchema,
       preferenceTags: {
         type: "array",
         items: { type: "string" },
         description: "偏好标签（如 轻食、儿童友好）",
+      },
+      preferredCuisine: {
+        type: "array",
+        items: { type: "string" },
+        description: "偏好菜系，用于优先排序而非硬过滤",
       },
       dietaryRestrictions: {
         type: "array",
@@ -354,6 +409,8 @@ export const SEARCH_BREAK_PLACES_TOOL: LLMToolDefinition = {
       hasElderly: { type: "boolean", description: "是否有老人（过滤无障碍设施）" },
       hasYoungChildren: { type: "boolean", description: "是否有幼童（过滤儿童友好）" },
       distance: distanceSchema,
+      destination: destinationSchema,
+      searchArea: searchAreaSchema,
       afterTime: { type: "string", description: "期望到达时间 HH:MM" },
     },
     required: ["breakSubtype", "hasElderly", "hasYoungChildren", "distance", "afterTime"],
@@ -431,6 +488,7 @@ export const ESTIMATE_TRANSIT_TOOL: LLMToolDefinition = {
 
 /** 全部工具的 LLM 定义索引（key 为工具名） */
 export const TOOL_DEFS: Record<string, LLMToolDefinition> = {
+  resolve_destination: RESOLVE_DESTINATION_TOOL,
   get_user_location: GET_USER_LOCATION_TOOL,
   search_attractions: SEARCH_ATTRACTIONS_TOOL,
   search_restaurants: SEARCH_RESTAURANTS_TOOL,

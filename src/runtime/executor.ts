@@ -5,7 +5,7 @@
 import type { AgentState } from "../../spec/agent.js";
 import type { RuntimePlan, RuntimePlanStep } from "./plan.js";
 import { assertValidRuntimePlan, getReadySteps } from "./plan.js";
-import { appendTraceEvent } from "./trace.js";
+import { AgentRun } from "./agent-run.js";
 
 export type RuntimeStepHandler = (
   state: AgentState,
@@ -26,12 +26,15 @@ export interface ExecutePlanOptions {
  */
 export async function executePlan(
   plan: RuntimePlan,
-  initialState: AgentState,
+  runOrState: AgentRun | AgentState,
   options: ExecutePlanOptions
 ): Promise<AgentState> {
   assertValidRuntimePlan(plan);
 
-  let state = initialState;
+  const run = runOrState instanceof AgentRun
+    ? runOrState
+    : AgentRun.fromState(runOrState);
+  let state = run.state;
   const completedStepIds = new Set<string>();
 
   while (completedStepIds.size < plan.steps.length) {
@@ -42,10 +45,10 @@ export async function executePlan(
       throw new Error("Runtime Plan 无可执行 Step：可能存在未满足的依赖或执行状态不一致");
     }
 
-    appendTraceEvent(state, {
+    run.emit({
       type: "step_started",
       stepId: step.id,
-      metadata: { stepType: step.type },
+      payload: { stepType: step.type },
     });
 
     const startedAt = Date.now();
@@ -58,11 +61,11 @@ export async function executePlan(
     state.currentStep = step.id;
     completedStepIds.add(step.id);
 
-    appendTraceEvent(state, {
+    run.emit({
       type: "step_finished",
       stepId: step.id,
       durationMs: Date.now() - startedAt,
-      metadata: { stepType: step.type, status: state.status },
+      payload: { stepType: step.type, status: state.status },
     });
 
     if (options.onStep) {

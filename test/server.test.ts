@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server/app.js";
 import { getProfileStore } from "../src/profile/store.js";
 import { checkRateLimit, resetRateLimit } from "../src/server/ratelimit.js";
+import { randomUUID } from "node:crypto";
 
 let app: FastifyInstance;
 
@@ -40,6 +41,12 @@ describe("GET /api/segments", () => {
 });
 
 describe("POST /api/decide", () => {
+  it("错误参数类型和未知枚举返回 400 而不是 500", async () => {
+    for (const payload of [{ text: 123 }, { text: "出游", segment: "unknown" }, { text: "出游", sessionId: {} }]) {
+      expect((await app.inject({ method: "POST", url: "/api/decide", payload })).statusCode).toBe(400);
+    }
+  });
+
   it("缺少 text 返回 400", async () => {
     const res = await app.inject({ method: "POST", url: "/api/decide", payload: {} });
     expect(res.statusCode).toBe(400);
@@ -68,6 +75,32 @@ describe("SSE /api/decide/stream", () => {
   it("缺少 q 返回 400", async () => {
     const res = await app.inject({ method: "GET", url: "/api/decide/stream" });
     expect(res.statusCode).toBe(400);
+  });
+});
+
+describe("conversation recovery API", () => {
+  it("persists a multi-turn plan and confirms a selected candidate", async () => {
+    const id = `test_conversation_${randomUUID()}`;
+    const created = await app.inject({ method: "POST", url: "/api/conversations", payload: { id } });
+    expect(created.statusCode).toBe(201);
+
+    const decided = await app.inject({ method: "POST", url: "/api/decide",
+      payload: { sessionId: id, text: "和女朋友周末约会，想吃火锅" } });
+    expect(decided.statusCode).toBe(200);
+    const output = decided.json();
+    expect(output.conversationId).toBe(id);
+    expect(output.planVersion).toBe(1);
+
+    const restored = await app.inject({ method: "GET", url: `/api/conversations/${id}` });
+    expect(restored.statusCode).toBe(200);
+    expect(restored.json().memory.constraints.group.preferences.preferredCuisine).toEqual(["火锅"]);
+
+    const planId = output.decision.pareto.at(-1).plan.id;
+    const confirmed = await app.inject({ method: "POST", url: `/api/conversations/${id}/confirm`,
+      payload: { version: 1, planId } });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json().memory.acceptedPlanVersion).toBe(1);
+    expect(confirmed.json().plans[0].selectedPlan.id).toBe(planId);
   });
 });
 

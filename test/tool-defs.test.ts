@@ -30,7 +30,7 @@ describe("工具 LLM 定义（Claude Code 式工具接口）", () => {
 
   test("registry.llmDefinitions() 输出 OpenAI 兼容的 function tool 格式", () => {
     const defs = toolRegistry.llmDefinitions();
-    expect(defs).toHaveLength(8);
+    expect(defs).toHaveLength(9);
 
     for (const def of defs) {
       expect(def.type).toBe("function");

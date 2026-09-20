@@ -122,10 +122,12 @@ export interface FollowUpAnswer {
   selectedValues: string[];
   /** 对约束的修正 */
   patches: Partial<{
+    dieting: boolean;
     leadRole: LeadRole;
     dietaryRestrictions: string[];
     preferredCuisine: string[];
     budget: "low" | "medium" | "high";
+    extraHints: string[];
   }>;
 }
 
@@ -157,6 +159,8 @@ export interface GeoLocation {
 
 /** 结构化约束（从自然语言提取 + 询问修正） */
 export interface StructuredConstraints {
+  /** 旅行目的地；未提供时沿用出发位置所在城市。 */
+  destination?: { city: string; district?: string };
   group: Group;
   timeWindow: TimeWindow;
   distance: DistanceConstraint;
@@ -211,6 +215,8 @@ export interface Place {
   rating: number;           // 1-5
   pricePerPerson?: number;  // 人均价格
   imageUrl?: string;
+  /** 外部地点数据的可追溯来源。 */
+  source?: import("./datasource.js").ProviderSource;
 }
 
 /** 景点/玩乐地点 */
@@ -329,6 +335,8 @@ export interface PlanningState {
   searchPolicy?: {
     radiusKm: number;
   };
+  /** 目的地经 Provider 解析后的实际检索区域。 */
+  resolvedSearchArea?: import("./datasource.js").SearchArea;
   /** Incremented whenever derived planning artifacts are invalidated. */
   planRevision?: number;
   followUpQuestions?: FollowUpQuestion[];

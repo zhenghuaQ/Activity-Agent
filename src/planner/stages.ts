@@ -35,6 +35,7 @@ import type { DeliveryItem } from "../../spec/types.js";
 import { scheduleActivities, getBreakSubtype } from "./scheduler.js";
 import { filterWithinRadius } from "../core/geo.js";
 import { runDecision, withRadiusEscalation } from "../decision/index.js";
+import type { SearchArea } from "../../spec/datasource.js";
 
 // ─── Stage 1: 意图解析 ──────────────────────────────
 
@@ -71,6 +72,7 @@ export async function stage2_followUp(
     for (const ans of answers) {
       constraints = applyFollowUpPatch(constraints, ans);
     }
+    return { ...state, stage: "follow_up_questions", constraints, followUpQuestions: [] };
   }
 
   // 检查是否需要追问
@@ -128,9 +130,18 @@ function applyFollowUpPatch(
   if (patches.dietaryRestrictions) preferences.dietaryRestrictions = patches.dietaryRestrictions;
   if (patches.preferredCuisine) preferences.preferredCuisine = patches.preferredCuisine;
   if (patches.budget) preferences.budget = patches.budget;
+  if (patches.dieting !== undefined) preferences.dieting = patches.dieting;
+  preferences.inferredDietary = { ...preferences.inferredDietary,
+    lowCalorie: preferences.dieting,
+    lightDiet: preferences.dieting || preferences.dietaryRestrictions.includes("轻油盐"),
+    softFood: preferences.dietaryRestrictions.includes("软食"),
+    restrictions: [...preferences.dietaryRestrictions] };
 
   return {
     ...constraints,
+    extraHints: patches.extraHints
+      ? [...new Set([...constraints.extraHints, ...patches.extraHints])]
+      : constraints.extraHints,
     group: { ...group, preferences },
   };
 }
@@ -151,6 +162,22 @@ export async function stage3_generateCandidates(
   const errors: string[] = [];
   const planningNotes: string[] = [];
 
+  let resolvedSearchArea: SearchArea | undefined = state.resolvedSearchArea;
+  if (state.constraints.destination && !resolvedSearchArea) {
+    const resolver = toolRegistry.get("resolve_destination");
+    if (!resolver) return { ...state, stage: "candidate_generation", candidates: [],
+      errors: ["resolve_destination tool 未注册"] };
+    const input = { destination: state.constraints.destination };
+    const result = await (toolExecutor
+      ? toolExecutor.execute<typeof input, SearchArea>("resolve_destination", input)
+      : resolver.execute(input));
+    if (result.status === "error") return { ...state, stage: "candidate_generation", candidates: [],
+      errors: [`目的地不可用: ${result.errorInfo.message}`] };
+    resolvedSearchArea = result.data;
+  }
+  const searchOrigin = resolvedSearchArea?.center ?? distance.homeLocation;
+  const providerScope = { destination: state.constraints.destination, searchArea: resolvedSearchArea };
+
   // ── 并行搜索：景点 + 餐厅 + 茶歇 ──
   const attractionTool = toolRegistry.get("search_attractions");
   const restaurantTool = toolRegistry.get("search_restaurants");
@@ -169,7 +196,8 @@ export async function stage3_generateCandidates(
     {
       crowdTags: getCrowdTagsForScenario(group.scenario, group.leadRole),
       timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
+      ...providerScope,
     },
     async (inp): Promise<Attraction[]> => {
       const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Attraction[]>("search_attractions", inp) : attractionTool.execute(inp));
@@ -183,8 +211,10 @@ export async function stage3_generateCandidates(
     {
       group,
       timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
+      ...providerScope,
       dietaryRestrictions: group.preferences.dietaryRestrictions,
+      preferredCuisine: group.preferences.preferredCuisine,
       preferenceTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
     },
     async (inp): Promise<Restaurant[]> => {
@@ -197,15 +227,16 @@ export async function stage3_generateCandidates(
 
   // 配送搜索（仅情侣场景自动附加配送，优先鲜花 > 蛋糕）
   let deliveryItems: DeliveryItem[] = [];
-  if (group.scenario === "couple") {
-    deliveryItems = filterWithinRadius(distance.homeLocation, DELIVERY_ITEMS, distance.maxKm);
+  if (group.scenario === "couple" && searchOrigin.city.includes("北京")) {
+    deliveryItems = filterWithinRadius(searchOrigin, DELIVERY_ITEMS, distance.maxKm);
   }
 
   const breakInput = {
     breakSubtype: getBreakSubtype(leadRole),
     hasElderly: group.ageGroup.seniors > 0,
     hasYoungChildren: group.ageGroup.youngChildren > 0,
-    distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
+    distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
+    ...providerScope,
     afterTime: timeWindow.start,
   };
   const breakResult = await (toolExecutor
@@ -221,7 +252,8 @@ export async function stage3_generateCandidates(
     const relaxedInput = {
       crowdTags: [],
       timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: distance.homeLocation },
+      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
+      ...providerScope,
     };
     const relaxed = await (toolExecutor
       ? toolExecutor.execute<typeof relaxedInput, Attraction[]>("search_attractions", relaxedInput)
@@ -250,7 +282,7 @@ export async function stage3_generateCandidates(
       const { activities, totalMinutes } = await scheduleActivities(
         places,
         timeWindow.start,
-        distance.homeLocation
+        searchOrigin
       );
 
       // 检查总时长是否在窗口内
@@ -290,6 +322,7 @@ export async function stage3_generateCandidates(
     ...state,
     stage: "candidate_generation",
     searchPolicy: state.searchPolicy ?? { radiusKm: searchRadiusKm },
+    resolvedSearchArea,
     planRevision: state.planRevision ?? 0,
     candidates,
     planningNotes,
@@ -304,7 +337,7 @@ export async function stage4_feasibilityCheck(
   toolExecutor?: ToolExecutor
 ): Promise<PlanningState> {
   if (!state.candidates || state.candidates.length === 0) {
-    return { ...state, stage: "feasibility_check", errors: ["无候选方案可校验"] };
+    return { ...state, stage: "feasibility_check", errors: [...(state.errors ?? []), "无候选方案可校验"] };
   }
 
   const availabilityTool = toolRegistry.get("check_attraction_availability");

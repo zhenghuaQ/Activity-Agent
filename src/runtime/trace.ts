@@ -1,84 +1,101 @@
 // ============================================================
-// src/runtime/trace.ts — Agent Runtime 统一 Trace 事件
+// src/runtime/trace.ts — AgentEvent 创建与 Run 内收集
 // ============================================================
 
+import {
+  AGENT_EVENT_SCHEMA_VERSION,
+  categoryForAgentEvent,
+  type AgentEvent,
+  type AgentEventInput,
+  type AgentEventOf,
+  type AgentEventType,
+} from "../../spec/agent-event.js";
 import { newAgentId, type AgentState } from "../../spec/agent.js";
-import { defaultRuntimeEventBus } from "./event-bus.js";
+import { reduceAgentEvent, replayAgentEvents, type AgentRunProjection } from "./event-reducer.js";
+import {
+  defaultAgentEventBus,
+  type AgentEventBus,
+} from "./event-bus.js";
 
-export type TraceEventType =
-  | "run_started"
-  | "plan_created"
-  | "step_started"
-  | "step_finished"
-  | "tool_call"
-  | "tool_result"
-  | "evaluation"
-  | "replan"
-  | "final"
-  | "error"
-  | "stage_update";
+const eventBuses = new WeakMap<AgentState, AgentEventBus>();
+const projections = new WeakMap<AgentState, AgentRunProjection>();
 
-export interface TraceEvent {
-  id: string;
-  traceId: string;
-  runId: string;
-  type: TraceEventType;
-  timestamp: number;
-  stepId?: string;
-  toolName?: string;
-  durationMs?: number;
-  metadata?: Record<string, unknown>;
+export function getAgentRunProjection(state: AgentState): AgentRunProjection {
+  let projection = projections.get(state);
+  if (!projection) {
+    projection = replayAgentEvents(state.trace ?? []);
+    projections.set(state, projection);
+  }
+  return projection;
 }
 
-export interface TraceCollector {
-  emit(event: Omit<TraceEvent, "id" | "traceId" | "runId" | "timestamp">): TraceEvent;
-  getEvents(): readonly TraceEvent[];
+export interface AgentEventCollector {
+  emit(event: AgentEventInput): AgentEvent;
+  getEvents(): readonly AgentEvent[];
 }
 
-/**
- * 内存 Trace Collector。
- * v1 先作为 Run 级事件总线；后续可以替换为 OTEL / 日志 / DB sink。
- */
-export class InMemoryTraceCollector implements TraceCollector {
-  private readonly events: TraceEvent[] = [];
+/** 独立的内存收集器，适合测试和不经过 AgentState 的运行。 */
+export class InMemoryAgentEventCollector implements AgentEventCollector {
+  private readonly events: AgentEvent[] = [];
 
   constructor(
     private readonly traceId: string,
     private readonly runId: string,
+    private readonly sessionId = "standalone",
   ) {}
 
-  emit(
-    event: Omit<TraceEvent, "id" | "traceId" | "runId" | "timestamp">,
-  ): TraceEvent {
-    const record: TraceEvent = {
-      id: newAgentId("traceevt"),
-      traceId: this.traceId,
-      runId: this.runId,
-      timestamp: Date.now(),
-      ...event,
-    };
+  emit(event: AgentEventInput): AgentEvent {
+    const record = createAgentEvent(
+      { traceId: this.traceId, runId: this.runId, sessionId: this.sessionId },
+      this.events.length + 1,
+      event,
+    );
     this.events.push(record);
     return record;
   }
 
-  getEvents(): readonly TraceEvent[] {
+  getEvents(): readonly AgentEvent[] {
     return this.events;
   }
 }
 
-export function appendTraceEvent(
-  state: AgentState,
-  event: Omit<TraceEvent, "id" | "traceId" | "runId" | "timestamp">,
-): TraceEvent {
-  const record: TraceEvent = {
-    id: newAgentId("traceevt"),
-    traceId: state.traceId,
-    runId: state.runId,
+export function createAgentEvent<TType extends AgentEventType>(
+  scope: AgentEvent["scope"],
+  sequence: number,
+  event: AgentEventInput<TType>,
+): AgentEventOf<TType> {
+  return {
+    schemaVersion: AGENT_EVENT_SCHEMA_VERSION,
+    id: newAgentId("agentevt"),
+    category: categoryForAgentEvent(event.type),
     timestamp: Date.now(),
+    sequence,
+    scope,
     ...event,
-  };
+  } as AgentEventOf<TType>;
+}
+
+/** 把一次 Run 显式绑定到注入的 EventBus。 */
+export function bindAgentEventBus(state: AgentState, eventBus: AgentEventBus): void {
+  eventBuses.set(state, eventBus);
+}
+
+/** 追加到 AgentState，并发布给该 Run 注入的 EventBus。 */
+export function appendAgentEvent<TType extends AgentEventType>(
+  state: AgentState,
+  event: AgentEventInput<TType>,
+  commit?: () => void,
+): AgentEventOf<TType> {
   state.trace ??= [];
+  const record = createAgentEvent(
+    { traceId: state.traceId, runId: state.runId, sessionId: state.sessionId },
+    state.trace.length + 1,
+    event,
+  );
+  const projection = reduceAgentEvent(getAgentRunProjection(state), record);
+  commit?.();
   state.trace.push(record);
-  defaultRuntimeEventBus.publish(record);
+  projections.set(state, projection);
+  (eventBuses.get(state) ?? defaultAgentEventBus).publish(record);
   return record;
 }

@@ -50,7 +50,8 @@ const FOLLOWUP_SCHEMA = {
 
 export async function generateFollowUpWithLLM(
   constraints: StructuredConstraints,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  catalog?: FollowUpQuestion[],
 ): Promise<FollowUpQuestion[]> {
   throwIfAborted(signal);
   const client = getLLMClient();
@@ -69,11 +70,12 @@ export async function generateFollowUpWithLLM(
         {
           role: "system",
           content:
-            "You are a follow-up module for a trip planner. Generate 1-3 questions to confirm user preferences. Only ask when necessary (kids/elderly scenarios). Keep questions concise and conversational.",
+            "Rephrase the provided catalog questions concisely in Chinese. Preserve every question id, meaning and option value. Do not add questions, infer answers, or invent constraints.",
         },
         {
           role: "user",
           content: JSON.stringify({
+            catalog,
             scenario: group.scenario,
             leadRole: group.leadRole,
             totalPeople: group.totalPeople,

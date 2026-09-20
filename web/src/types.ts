@@ -1,62 +1,15 @@
 // ============================================================
 // web/src/types.ts — 前端类型定义（与 spec/ 对齐，仅保留 UI 所需）
 //
-// 注：前端独立 tsconfig，不直接 import 后端 spec/，
-//     手动同步核心类型避免跨项目依赖。
-// ============================================================
-
-// ─── 决策契约（spec/decision.ts） ─────────────────────
-
-export type ScoreDimension =
-  | "time"
-  | "transit"
-  | "preference"
-  | "crowd"
-  | "budget"
-  | "popularity";
-
-export type PlanObjective =
-  | "balanced"
-  | "time_saver"
-  | "budget_saver"
-  | "experience";
-
-export interface DimensionScore {
-  dimension: ScoreDimension;
-  score: number;
-  weight: number;
-  weighted: number;
-  reason: string;
-}
-
-export interface PlanScore {
-  total: number;
-  dimensions: DimensionScore[];
-  confidence: number;
-}
-
-export interface PlanExplanation {
-  highlights: string[];
-  tradeoffs: string[];
-  whyNotOthers?: string[];
-}
-
-export interface PlanCandidate {
-  id: string;
-  objective: PlanObjective;
-  plan: Plan;
-  score: PlanScore;
-  explanation: PlanExplanation;
-}
-
-export interface DecisionResult {
-  recommended: PlanCandidate;
-  pareto: PlanCandidate[];
-  confidence: number;
-  notes: string[];
-}
-
-export type WeatherCondition = "clear" | "rain" | "snow" | "hot" | "cold" | "unknown";
+// 决策数据直接复用共享契约，避免前后端字段漂移。
+import type { ScoreDimension, WeatherCondition } from "../../spec/decision.js";
+export type {
+  ScoreDimension, PlanObjective, DimensionScore, PlanScore,
+  PlanExplanation, DecisionResult, WeatherCondition,
+} from "../../spec/decision.js";
+export type { PlanCandidate, Plan, Activity, ActivityType, PlanningStage } from "../../spec/types.js";
+export type { DecisionResponse as DoneEvent, DecisionStage as StageEvent } from "../../spec/decision-response.js";
+export type { PlanningConversation, ConversationTurn, ConversationPlanVersion } from "../../spec/conversation.js";
 
 // ─── 画像契约（spec/profile.ts） ─────────────────────
 
@@ -98,53 +51,7 @@ export interface SegmentInfo {
   description: string;
 }
 
-// ─── Plan/Activity（spec/types.ts 精简） ─────────────
-
-export type ActivityType = "attraction" | "break" | "meal";
-
-export interface Activity {
-  order: number;
-  type: ActivityType;
-  placeId: string;
-  placeName: string;
-  start: string;
-  end: string;
-  address?: string;
-  notes?: string[];
-  crowdLevel?: "low" | "medium" | "high";
-}
-
-export interface Plan {
-  id: string;
-  activities: Activity[];
-  totalDurationMinutes: number;
-  totalTransitMinutes: number;
-  totalCostRange?: { min: number; max: number };
-  summary?: string;
-}
-
-// ─── SSE 事件（planner/engine.ts StageEvent） ─────────
-
-export type PlanningStage =
-  | "intent_parsing"
-  | "follow_up_questions"
-  | "candidate_generation"
-  | "feasibility_check"
-  | "fine_scheduling";
-
-export interface StageEvent {
-  stage: PlanningStage;
-  message: string;
-  ts?: number;
-}
-
-export interface DoneEvent {
-  success: boolean;
-  message: string;
-  decision?: DecisionResult;
-  selectedPlan?: Plan;
-  notes: string[];
-}
+// ─── SSE 展示事件 ───────────────────────────────────
 
 export interface ErrorEvent {
   message: string;
@@ -153,6 +60,8 @@ export interface ErrorEvent {
 // ─── 指标（server/metrics.ts snapshot） ──────────────
 
 export interface MetricsSnapshot {
+  runtime?: { activeRuns: number; sessions: number; queued: number; rejected: number };
+  subscribers?: { subscribers: number; pending: number; delivered: number; failed: number; rejected: number; processingMs: number };
   uptimeMs: number;
   requests: number;
   errors: number;

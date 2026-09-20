@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import type { AgentEvent } from "../spec/agent-event.js";
 import type { ChannelRequest } from "../spec/channel.js";
+import { InMemoryAgentEventBus } from "../src/runtime/event-bus.js";
 import type { Submission } from "../src/runtime/submission.js";
-import type { TraceEvent } from "../src/runtime/trace.js";
-import { InMemoryRuntimeEventBus } from "../src/runtime/event-bus.js";
+import { createAgentEvent } from "../src/runtime/trace.js";
 import {
   buildChannelRoutes,
   type HandlerDependencies,
@@ -47,19 +48,22 @@ function createBlockingRuntime(
   } as HandlerDependencies["runtime"];
 }
 
-function makeTrace(traceId: string, type: TraceEvent["type"]): TraceEvent {
-  return {
-    id: `${traceId}_${type}`,
-    runId: "run_test",
-    traceId,
-    type,
-    timestamp: Date.now(),
-  };
+function makeEvent(traceId: string, type: "run_started" | "final"): AgentEvent {
+  const scope = { traceId, runId: "run_test", sessionId: "session_test" };
+  return type === "final"
+    ? createAgentEvent(scope, 2, {
+        type,
+        payload: { success: true, status: "completed" },
+      })
+    : createAgentEvent(scope, 1, {
+        type,
+        payload: { planner: "test" },
+      });
 }
 
-describe("Runtime SSE adapter", () => {
-  it("closes an SSE subscription when submission fails before final", async () => {
-    const eventBus = new InMemoryRuntimeEventBus();
+describe("AgentEvent SSE Subscriber", () => {
+  it("closes its EventBus subscription when submission fails before final", async () => {
+    const eventBus = new InMemoryAgentEventBus();
     const runtime = {
       submit: vi.fn(),
       submitSubmission: vi.fn(async (submission: Submission) => ({
@@ -83,7 +87,7 @@ describe("Runtime SSE adapter", () => {
     })).resolves.toBeUndefined();
 
     expect(emitted.at(-1)).toMatchObject({ event: "error" });
-    expect(eventBus.subscriberCount("trace_test")).toBe(0);
+    expect(eventBus.subscriberCount()).toBe(0);
   });
 
   it("cancels the Runtime submission when the transport disconnects", async () => {
@@ -97,7 +101,7 @@ describe("Runtime SSE adapter", () => {
     });
     const routes = buildChannelRoutes({
       runtime,
-      eventBus: new InMemoryRuntimeEventBus(),
+      eventBus: new InMemoryAgentEventBus(),
       createId: () => "trace_disconnect",
     });
     const stream = routes.find((item) => item.path === "/api/decide/stream")!.stream!;
@@ -114,14 +118,14 @@ describe("Runtime SSE adapter", () => {
     expect(submittedSignal?.reason).toEqual(new Error("client_disconnected"));
   });
 
-  it("emits done only after the matching final runtime event", async () => {
-    const eventBus = new InMemoryRuntimeEventBus();
+  it("emits done only after the matching final AgentEvent", async () => {
+    const eventBus = new InMemoryAgentEventBus();
     const runtime = {
       submit: vi.fn(),
       submitSubmission: vi.fn(async (submission: Submission) => {
-        eventBus.publish(makeTrace("trace_other", "run_started"));
-        eventBus.publish(makeTrace(submission.traceId, "run_started"));
-        eventBus.publish(makeTrace(submission.traceId, "final"));
+        eventBus.publish(makeEvent("trace_other", "run_started"));
+        eventBus.publish(makeEvent(submission.traceId, "run_started"));
+        eventBus.publish(makeEvent(submission.traceId, "final"));
         return {
           submissionId: submission.id,
           sessionId: submission.sessionId,
@@ -146,12 +150,14 @@ describe("Runtime SSE adapter", () => {
 
     await stream(
       makeRequest({ q: "test" }),
-      (event, data) => emitted.push({ event, data }),
+      (event, data) => { emitted.push({ event, data }); },
     );
 
-    const runtimeEvents = emitted.filter((item) => item.event === "runtime");
-    expect(runtimeEvents.every((item) =>
-      (item.data as TraceEvent).traceId === "trace_test")).toBe(true);
+    const agentEvents = emitted.filter((item) => item.event === "agent_event");
+    expect(agentEvents.every((item) =>
+      (item.data as AgentEvent).scope.traceId === "trace_test"
+    )).toBe(true);
     expect(emitted.at(-1)?.event).toBe("done");
+    expect(eventBus.subscriberCount()).toBe(0);
   });
 });

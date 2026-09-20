@@ -5,6 +5,7 @@ import ProfilePage from "./pages/ProfilePage.js";
 import { listSegments } from "./api.js";
 import type { SegmentInfo } from "./types.js";
 import "./App.css";
+import { ErrorBoundary } from "./ErrorBoundary.js";
 
 type Tab = "decision" | "monitor" | "profile";
 
@@ -49,9 +50,11 @@ export default function App() {
       </header>
 
       <main className="app-main">
+        <ErrorBoundary key={tab}>
         {tab === "decision" && <DecisionPage segments={segments} />}
         {tab === "monitor" && <MonitorPage />}
         {tab === "profile" && <ProfilePage />}
+        </ErrorBoundary>
       </main>
 
       <footer className="app-footer">

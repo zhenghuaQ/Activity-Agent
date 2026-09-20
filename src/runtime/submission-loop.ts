@@ -26,9 +26,17 @@ function deferred<T>(): Deferred<T> {
 interface QueuedSubmission {
   submission: Submission;
   deferred: Deferred<SubmissionResult>;
+  abort?: () => void;
+}
+
+export interface SubmissionLoopLimits {
+  maxQueuedTurns?: number;
+  maxQueuedControls?: number;
+  deadlineMs?: number;
 }
 
 export interface SubmissionLoopHandlers {
+  onIdle?: () => void;
   executeTurn: (
     submission: Submission,
     controller: AbortController,
@@ -60,9 +68,24 @@ export class SessionSubmissionLoop {
   constructor(
     readonly sessionId: SessionId,
     private readonly handlers: SubmissionLoopHandlers,
-  ) {}
+    private readonly limits: SubmissionLoopLimits = {},
+  ) {
+    for (const value of Object.values(limits)) {
+      if (!Number.isSafeInteger(value) || value! < 1) throw new Error("invalid_submission_limit");
+    }
+  }
 
   submit(submission: Submission): Promise<SubmissionResult> {
+    if (submission.signal?.aborted) return Promise.resolve({
+      submissionId: submission.id, sessionId: submission.sessionId, traceId: submission.traceId,
+      status: "rejected", error: "submission_cancelled",
+    });
+    const queue = submission.op.type === "turn" ? this.turnQueue : this.controlQueue;
+    const limit = submission.op.type === "turn" ? (this.limits.maxQueuedTurns ?? 32) : (this.limits.maxQueuedControls ?? 32);
+    if (queue.length >= limit) return Promise.resolve({
+      submissionId: submission.id, sessionId: submission.sessionId, traceId: submission.traceId,
+      status: "rejected", error: "submission_queue_full",
+    });
     if (this.stopped) {
       return Promise.resolve({
         submissionId: submission.id,
@@ -76,6 +99,29 @@ export class SessionSubmissionLoop {
     const item: QueuedSubmission = {
       submission,
       deferred: deferred<SubmissionResult>(),
+    };
+    // deadline 包含排队；超时可先答复，但不假装底层未完成的任务已释放资源。
+    const resolve = item.deferred.resolve;
+    const timer = setTimeout(() => {
+      const index = queue.indexOf(item);
+      if (index >= 0) queue.splice(index, 1);
+      item.abort?.();
+      item.deferred.resolve({ submissionId: submission.id, sessionId: submission.sessionId,
+        traceId: submission.traceId, status: "failed", error: "submission_deadline_exceeded" });
+    }, this.limits.deadlineMs ?? 120_000);
+    const onAbort = () => {
+      const index = queue.indexOf(item);
+      // 运行中的任务由 linked signal 通知，保留其原始取消结果；deadline 仍兜底。
+      if (index < 0) return;
+      queue.splice(index, 1);
+      item.deferred.resolve({ submissionId: submission.id, sessionId: submission.sessionId,
+        traceId: submission.traceId, status: "failed", error: "submission_cancelled" });
+    };
+    submission.signal?.addEventListener("abort", onAbort, { once: true });
+    item.deferred.resolve = result => {
+      clearTimeout(timer);
+      submission.signal?.removeEventListener("abort", onAbort);
+      resolve(result);
     };
     if (submission.op.type === "turn") {
       this.turnQueue.push(item);
@@ -150,6 +196,7 @@ export class SessionSubmissionLoop {
       }
     } finally {
       this.running = false;
+      if (this.isIdle()) this.handlers.onIdle?.();
     }
   }
 
@@ -171,6 +218,7 @@ export class SessionSubmissionLoop {
   private startTurn(item: QueuedSubmission): void {
     const { submission } = item;
     const { controller, dispose } = linkAbortSignal(submission.signal);
+    item.abort = () => controller.abort(new Error("submission_deadline_exceeded"));
     const completion = this.handlers
       .executeTurn(submission, controller)
       .then((result) => item.deferred.resolve(result))
@@ -218,6 +266,7 @@ export class SessionSubmissionLoop {
 export function createSessionSubmissionLoop(
   sessionId: SessionId,
   handlers: SubmissionLoopHandlers,
+  limits: SubmissionLoopLimits = {},
 ): SessionSubmissionLoop {
-  return new SessionSubmissionLoop(sessionId, handlers);
+  return new SessionSubmissionLoop(sessionId, handlers, limits);
 }

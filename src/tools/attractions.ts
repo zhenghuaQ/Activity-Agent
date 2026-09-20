@@ -15,6 +15,7 @@ import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
+import { rethrowProviderError } from "./provider-errors.js";
 
 // ─── Tool 1: search_attractions ────────────────────────
 
@@ -28,12 +29,11 @@ export class SearchAttractionsTool extends BaseTool<
 
   async run(input: T.SearchAttractionsInput, context?: ToolExecutionContext): Promise<Attraction[]> {
     const ds = getDataSource();
-    let results = await ds.searchAttractions({
-      origin: input.distance.homeLocation,
-      radiusKm: input.distance.maxKm,
-      keywords: input.keywords,
-      localFeatures: input.localFeatures,
-    }, context?.signal);
+    let results: Attraction[];
+    try { results = await ds.searchAttractions({
+      origin: input.distance.homeLocation, destination: input.destination, searchArea: input.searchArea,
+      radiusKm: input.distance.maxKm, keywords: input.keywords, localFeatures: input.localFeatures,
+    }, { signal: context?.signal }); } catch (error) { rethrowProviderError(error); }
 
     // 人群标签匹配（业务过滤）
     if (input.crowdTags.length > 0) {
@@ -60,7 +60,7 @@ export class CheckAttractionAvailabilityTool extends BaseTool<
   inputSchema = CHECK_ATTRACTION_AVAILABILITY_TOOL.inputSchema;
 
   async run(input: T.CheckAttractionAvailabilityInput, context?: ToolExecutionContext): Promise<T.AttractionAvailability> {
-    const attr = await getDataSource().getAttractionById(input.attractionId, context?.signal);
+    const attr = await getDataSource().getAttractionById(input.attractionId, { signal: context?.signal });
     if (!attr) {
       throw new ToolError("E_RESOURCE_NOT_FOUND", `景点 ${input.attractionId} 不存在`);
     }

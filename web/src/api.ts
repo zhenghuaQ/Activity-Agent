@@ -5,14 +5,15 @@
 // 开发态由 Vite proxy 转发到 localhost:3000。
 // ============================================================
 
+import { parseDecisionResponse, parseDecisionStage } from "../../spec/decision-response.js";
+import { parseFollowUpRequest, type FollowUpRequest, type FollowUpSelection } from "../../spec/follow-up.js";
+import type { PlanningConversation } from "../../spec/conversation.js";
 import type {
   DecideRequest,
-  DecisionResult,
   DoneEvent,
   ErrorEvent,
   HealthInfo,
   MetricsSnapshot,
-  Plan,
   RuntimeFlags,
   SegmentInfo,
   StageEvent,
@@ -23,14 +24,7 @@ const BASE = "";
 
 // ─── 同步决策 ────────────────────────────────────────
 
-export interface DecideResponse {
-  success: boolean;
-  message: string;
-  constraints: unknown;
-  decision?: DecisionResult;
-  selectedPlan?: Plan;
-  notes: string[];
-}
+export type DecideResponse = DoneEvent;
 
 export async function decide(req: DecideRequest): Promise<DecideResponse> {
   const res = await fetch(`${BASE}/api/decide`, {
@@ -42,54 +36,108 @@ export async function decide(req: DecideRequest): Promise<DecideResponse> {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${res.status}`);
   }
-  return res.json();
+  return parseDecisionResponse(await res.json());
 }
 
 // ─── SSE 流式决策 ────────────────────────────────────
 
 export interface StreamHandlers {
+  onFollowUp?: (request: FollowUpRequest) => void;
   onStage: (e: StageEvent) => void;
   onDone: (e: DoneEvent) => void;
   onError: (e: ErrorEvent) => void;
 }
 
 export function streamDecide(
-  params: { q: string; segment?: SegmentInfo["segment"]; weather?: string },
+  params: { q: string; segment?: SegmentInfo["segment"]; weather?: string; sessionId?: string },
   handlers: StreamHandlers
 ): () => void {
   const url = new URL(`${BASE}/api/decide/stream`, window.location.origin);
   url.searchParams.set("q", params.q);
+  if (handlers.onFollowUp) url.searchParams.set("interactive", "1");
   if (params.segment) url.searchParams.set("segment", params.segment);
   if (params.weather) url.searchParams.set("weather", params.weather);
+  if (params.sessionId) url.searchParams.set("sessionId", params.sessionId);
 
   const es = new EventSource(url.toString());
+  let finished = false;
+  const close = () => { finished = true; es.close(); };
+  const fail = (message: string) => { if (finished) return; close(); handlers.onError({ message }); };
 
   es.addEventListener("stage", (ev) => {
+    if (finished) return;
     try {
-      handlers.onStage(JSON.parse((ev as MessageEvent).data));
+      handlers.onStage(parseDecisionStage(JSON.parse((ev as MessageEvent).data)));
     } catch {
-      console.warn("Failed to parse SSE stage event");
+      fail("规划进度解析失败，请重试");
     }
+  });
+
+  es.addEventListener("follow_up", (ev) => {
+    if (finished) return;
+    try { handlers.onFollowUp?.(parseFollowUpRequest(JSON.parse((ev as MessageEvent).data))); }
+    catch { fail("追问内容解析失败，请重新开始"); }
   });
 
   es.addEventListener("done", (ev) => {
+    if (finished) return;
     try {
-      handlers.onDone(JSON.parse((ev as MessageEvent).data));
+      const result = parseDecisionResponse(JSON.parse((ev as MessageEvent).data));
+      close();
+      handlers.onDone(result);
     } catch {
-      console.warn("Failed to parse SSE stage event");
+      fail("决策结果解析失败，请重试");
     }
-    es.close();
   });
 
-  es.addEventListener("error", () => {
+  es.addEventListener("error", (ev) => {
     // readyState=CLOSED 通常是 done 后正常关闭，忽略
-    if (es.readyState === EventSource.CLOSED) return;
+    if (finished) return;
     // 网络错误/后端 down：error 事件无 data，直接报连接异常
-    handlers.onError({ message: "连接异常，请确认后端服务可用" });
-    es.close();
+    let message = "连接异常，请确认后端服务可用";
+    if ("data" in ev && typeof ev.data === "string") {
+      try {
+        const payload = JSON.parse(ev.data);
+        if (payload && typeof payload.message === "string") message = payload.message;
+      } catch { /* 非 JSON 错误仍显示连接提示 */ }
+    }
+    fail(message);
   });
 
-  return () => es.close();
+  return close;
+}
+
+export async function getConversation(id: string): Promise<PlanningConversation | undefined> {
+  const res = await fetch(`${BASE}/api/conversations/${encodeURIComponent(id)}`);
+  if (res.status === 404) return undefined;
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function createConversation(id: string): Promise<PlanningConversation> {
+  const res = await fetch(`${BASE}/api/conversations`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function confirmConversationPlan(id: string, version: number, planId: string): Promise<PlanningConversation> {
+  const res = await fetch(`${BASE}/api/conversations/${encodeURIComponent(id)}/confirm`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ version, planId }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || `HTTP ${res.status}`);
+  return body;
+}
+
+export async function answerFollowUp(request: FollowUpRequest, answers: FollowUpSelection[], signal?: AbortSignal): Promise<void> {
+  const res = await fetch(`${BASE}/api/decide/answer`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, signal,
+    body: JSON.stringify({ sessionId: request.sessionId, runId: request.runId, requestId: request.requestId, answers }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || `HTTP ${res.status}`);
+  if (body.accepted !== true || body.requestId !== request.requestId) throw new Error("回答确认失败，请重试");
 }
 
 // ─── 分层 ────────────────────────────────────────────

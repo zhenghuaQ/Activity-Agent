@@ -26,8 +26,8 @@ import { metrics } from "./metrics.js";
 import { getRuntimeFlags, setRuntimeFlags, type RuntimeFlags } from "./flags.js";
 import { getOpenApiSpec } from "./openapi.js";
 import {
-  defaultRuntimeEventBus,
-  type RuntimeEventBus,
+  defaultAgentEventBus,
+  type AgentEventBus,
 } from "../runtime/event-bus.js";
 import { newAgentId } from "../../spec/agent.js";
 import {
@@ -38,6 +38,11 @@ import {
   type SubmissionResult,
 } from "../runtime/index.js";
 import { SWAGGER_HTML } from "./swagger-html.js";
+import { SseAgentEventSubscriber } from "./subscribers/sse-agent-event-subscriber.js";
+import { parseFollowUpSelections } from "../../spec/follow-up.js";
+import { linkAbortSignal } from "../runtime/abort.js";
+import { defaultConversationStore, type ConversationStore } from "../conversation/store.js";
+import { ConversationMemorySubscriber } from "../conversation/subscriber.js";
 
 // ─── 内部工具 ──────────────────────────────────────────
 
@@ -59,15 +64,18 @@ interface ProfileBody {
 
 export interface HandlerDependencies {
   runtime: Pick<AgentRuntime, "submit" | "submitSubmission">;
-  eventBus: RuntimeEventBus;
+  eventBus: AgentEventBus;
   createId: (prefix: string) => string;
+  conversationStore?: Pick<ConversationStore, "get" | "list" | "getOrCreate" | "appendTurn" | "setPendingQuestion" | "checkpointConstraints" | "completePlan" | "confirmPlan">;
 }
 
 const DEFAULT_DEPENDENCIES: HandlerDependencies = {
   runtime: defaultAgentRuntime,
-  eventBus: defaultRuntimeEventBus,
+  eventBus: defaultAgentEventBus,
   createId: newAgentId,
 };
+
+const conversations = (deps: HandlerDependencies) => deps.conversationStore ?? defaultConversationStore;
 
 /** 解析请求所用画像：profileId 优先，其次 segment 临时画像 */
 async function resolveRequestProfile(
@@ -130,25 +138,33 @@ async function decide(
   deps: HandlerDependencies,
 ): Promise<ChannelResponse> {
   const body = (req.body || {}) as DecideBody;
-  if (!body.text || !body.text.trim()) {
+  if (typeof body.text !== "string" || !body.text.trim()) {
     return badRequest("缺少 text");
   }
+  if (body.text.length > 8000 || (body.segment !== undefined && !ALL_SEGMENTS.includes(body.segment))
+    || (body.sessionId !== undefined && typeof body.sessionId !== "string")
+    || (body.profileId !== undefined && typeof body.profileId !== "string")
+    || (body.autoSegment !== undefined && typeof body.autoSegment !== "boolean")
+    || (body.weather !== undefined && !["clear", "rain", "snow", "hot", "cold", "unknown"].includes(body.weather))) return badRequest("决策参数无效");
   const profile = await resolveRequestProfile(body.profileId, body.segment);
   const session = resolveSession(req, body.sessionId, deps.createId);
+  const conversation = await conversations(deps).getOrCreate(session.sessionId, body.text);
+  await conversations(deps).appendTurn(session.sessionId, "user", "text", body.text);
   const result = await deps.runtime.submit(
     createAgentInput(body.text, {
       profile,
       autoSegment: body.autoSegment,
       weather: body.weather,
       parseFn: pickParseFn(),
+      baseConstraints: conversation.memory.constraints,
     }),
     { ...session, op: { type: "turn" }, signal: req.signal },
   );
 
   if (!result.result || typeof result.result !== "object") {
     return {
-      statusCode: result.status === "rejected" ? 409 : 500,
-      body: { error: result.error || "runtime_execution_failed", submissionId: result.submissionId },
+      statusCode: result.status === "rejected" ? 429 : result.error === "submission_deadline_exceeded" ? 504 : 500,
+      body: { error: result.error || "runtime_execution_failed", message: result.error || "规划失败，请重试", submissionId: result.submissionId },
     };
   }
 
@@ -158,6 +174,12 @@ async function decide(
     state: import("../../spec/types.js").PlanningState;
   };
   metrics.recordDecision(isDegraded(pipelineResult.state));
+  let planVersion: number | undefined;
+  if (result.runId && pipelineResult.state.constraints && pipelineResult.state.decision && pipelineResult.state.selectedPlan) {
+    const updated = await conversations(deps).completePlan(session.sessionId, result.runId,
+      pipelineResult.state.constraints, pipelineResult.state.decision, pipelineResult.state.selectedPlan, pipelineResult.message);
+    planVersion = updated.memory.currentPlanVersion;
+  }
 
   return {
     body: {
@@ -165,6 +187,8 @@ async function decide(
       sessionId: result.sessionId,
       runId: result.runId,
       traceId: result.traceId,
+      conversationId: session.sessionId,
+      planVersion,
       success: pipelineResult.success,
       message: pipelineResult.message,
       constraints: pipelineResult.state.constraints,
@@ -176,100 +200,89 @@ async function decide(
 }
 
 /** SSE 流式决策 */
+async function answerFollowUp(req: ChannelRequest, deps: HandlerDependencies): Promise<ChannelResponse> {
+  const body = req.body as Record<string, unknown> | undefined;
+  if (!body || !["sessionId", "runId", "requestId"].every(key => typeof body[key] === "string" && (body[key] as string).trim().length > 0 && (body[key] as string).length <= 200)) return badRequest("追问标识无效");
+  let answers;
+  try { answers = parseFollowUpSelections(body.answers); }
+  catch { return badRequest("请为每个问题选择一个有效答案"); }
+  const result = await deps.runtime.submit("", { sessionId: body.sessionId as string, signal: req.signal,
+    op: { type: "answer", runId: body.runId as string, requestId: body.requestId as string, answers } });
+  if (result.status !== "completed") return { statusCode: result.error === "invalid_follow_up_answers" ? 400 : 409,
+    body: { error: result.error, message: result.error === "invalid_follow_up_answers" ? "回答与当前问题不匹配，请重新选择" : "追问已失效、已提交或运行已结束，请重新开始" } };
+  await conversations(deps).setPendingQuestion(body.sessionId as string, undefined).catch(() => undefined);
+  await conversations(deps).appendTurn(body.sessionId as string, "user", "choice",
+    `已回答：${answers.flatMap(answer => answer.selectedValues).join("、")}`).catch(() => undefined);
+  return { body: result.result };
+}
+
 async function decideStream(
   req: ChannelRequest,
-  emit: (event: string, data: unknown) => void,
+  emit: import("../../spec/channel.js").ChannelEmitter,
   deps: HandlerDependencies,
 ): Promise<void | ChannelResponse> {
-  const q = (req.query.q || "").trim();
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
   if (!q) return badRequest("缺少查询参数 q");
+  if (req.query.sessionId !== undefined && typeof req.query.sessionId !== "string") return badRequest("sessionId 无效");
+  if (req.query.interactive !== undefined && !["0", "1"].includes(req.query.interactive)) return badRequest("interactive 无效");
+  if (q.length > 8000 || (req.query.segment && !ALL_SEGMENTS.includes(req.query.segment as UserSegment))
+    || (req.query.weather && !["clear", "rain", "snow", "hot", "cold", "unknown"].includes(req.query.weather))) return badRequest("决策参数无效");
 
   const segment = req.query.segment as UserSegment | undefined;
   const weather = req.query.weather as WeatherCondition | undefined;
 
   const traceId = deps.createId("trace");
-  const subscription = deps.eventBus.subscribe(traceId);
+  const linked = linkAbortSignal(req.signal);
+  let conversationId: string | undefined;
+  const subscriber = new SseAgentEventSubscriber(traceId, emit);
+  const subscription = deps.eventBus.subscribe(subscriber);
+  const memorySubscription = deps.eventBus.subscribe(
+    new ConversationMemorySubscriber(traceId, conversations(deps)),
+  );
   try {
     const profile = await resolveRequestProfile(undefined, segment);
     const session = resolveSession(req, req.query.sessionId, deps.createId);
+    conversationId = session.sessionId;
+    const conversation = await conversations(deps).getOrCreate(session.sessionId, q);
+    await conversations(deps).appendTurn(session.sessionId, "user", "text", q);
     const submission = createSubmission(
       createAgentInput(q, {
         profile,
         weather,
         parseFn: pickParseFn(),
+        interactive: req.query.interactive === "1",
+        baseConstraints: conversation.memory.constraints,
       }),
       {
         ...session,
         traceId,
         op: { type: "turn" },
-        signal: req.signal,
+        signal: linked.controller.signal,
       },
     );
     const runPromise = deps.runtime.submitSubmission(submission);
-    const iterator = subscription[Symbol.asyncIterator]();
-    let submissionResult: SubmissionResult | undefined;
-    let sawFinal = false;
-
-    while (!sawFinal) {
-      const next = iterator.next().then((value) => ({
-        kind: "event" as const,
-        value,
-      }));
-      const completed = runPromise.then((value) => ({
-        kind: "result" as const,
-        value,
-      }));
-      const settled = await Promise.race([next, completed]);
-
-      if (req.signal?.aborted) {
-        await runPromise;
-        return;
-      }
-
-      if (settled.kind === "result") {
-        submissionResult = settled.value;
-        if (!sawFinal) {
-          emit("error", {
-            message: submissionResult.error ?? "runtime_finished_without_final_event",
-            submissionId: submissionResult.submissionId,
-          });
-          return;
-        }
-        break;
-      }
-
-      if (settled.value.done) {
-        submissionResult = await runPromise;
-        emit("error", {
-          message: submissionResult.error ?? "runtime_event_stream_closed",
-          submissionId: submissionResult.submissionId,
-        });
-        return;
-      }
-
-      const event = settled.value.value;
-      if (event.type === "stage_update") {
-        const metadata = event.metadata ?? {};
-        emit("stage", {
-          stage: metadata.stage,
-          index: metadata.index,
-          total: metadata.total,
-          message: String(metadata.stage ?? ""),
-          data: metadata.data,
-        });
-      } else {
-        emit("runtime", event);
-      }
-      sawFinal = event.type === "final";
-    }
-
-    submissionResult ??= await runPromise;
+    const settled = await Promise.race([
+      subscriber.waitForFinal().then(() => "final" as const),
+      runPromise.then(() => "result" as const),
+    ]);
+    const submissionResult: SubmissionResult = await runPromise;
     if (req.signal?.aborted) return;
+    subscription.close();
+    memorySubscription.close();
+    const [delivery] = await Promise.all([subscription.drain(), memorySubscription.drain()]);
+    if (delivery.failed || delivery.rejected) throw delivery.lastError;
+    if (settled === "result" && !subscriber.hasFinal) {
+      await subscriber.fail(
+        submissionResult.error ?? "runtime_finished_without_final_event",
+        submissionResult.submissionId,
+      );
+      return;
+    }
     if (!submissionResult.result || typeof submissionResult.result !== "object") {
-      emit("error", {
-        message: submissionResult.error ?? "runtime_execution_failed",
-        submissionId: submissionResult.submissionId,
-      });
+      await subscriber.fail(
+        submissionResult.error ?? "runtime_execution_failed",
+        submissionResult.submissionId,
+      );
       return;
     }
     const result = submissionResult.result as {
@@ -278,24 +291,66 @@ async function decideStream(
       state: import("../../spec/types.js").PlanningState;
     };
     metrics.recordDecision(isDegraded(result.state));
-    emit("done", {
+    let planVersion: number | undefined;
+    if (submissionResult.runId && result.state.constraints && result.state.decision && result.state.selectedPlan) {
+      const updated = await conversations(deps).completePlan(session.sessionId, submissionResult.runId,
+        result.state.constraints, result.state.decision, result.state.selectedPlan, result.message);
+      planVersion = updated.memory.currentPlanVersion;
+    }
+    await subscriber.complete({
       submissionId: submissionResult.submissionId,
       sessionId: submissionResult.sessionId,
       runId: submissionResult.runId,
       traceId,
+      conversationId: session.sessionId,
+      planVersion,
       success: result.success,
       message: result.message,
       decision: result.state.decision,
       selectedPlan: result.state.selectedPlan,
+      constraints: result.state.constraints,
       notes: result.state.planningNotes ?? [],
     });
   } catch (err) {
     if (!req.signal?.aborted) {
-      emit("error", { message: err instanceof Error ? err.message : String(err) });
+      await subscriber.fail(err instanceof Error ? err.message : String(err));
     }
   } finally {
     subscription.close();
+    memorySubscription.close();
+    await memorySubscription.drain().catch(() => undefined);
+    if (conversationId) await conversations(deps).setPendingQuestion(conversationId, undefined).catch(() => undefined);
+    linked.controller.abort(new Error("stream_closed"));
+    linked.dispose();
   }
+}
+
+async function listConversations(_req: ChannelRequest, deps: HandlerDependencies): Promise<ChannelResponse> {
+  const values = await conversations(deps).list();
+  return { body: values.map(value => ({ id: value.id, title: value.title, updatedAt: value.updatedAt,
+    currentPlanVersion: value.memory.currentPlanVersion, acceptedPlanVersion: value.memory.acceptedPlanVersion })) };
+}
+
+async function getConversation(req: ChannelRequest, deps: HandlerDependencies): Promise<ChannelResponse> {
+  const value = await conversations(deps).get(req.params.id);
+  return value ? { body: value } : { statusCode: 404, body: { error: "conversation_not_found", message: "会话不存在" } };
+}
+
+async function createConversation(req: ChannelRequest, deps: HandlerDependencies): Promise<ChannelResponse> {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const id = typeof body.id === "string" && body.id.trim() ? body.id.trim() : deps.createId("conversation");
+  if (id.length > 200) return badRequest("会话 ID 无效");
+  return { statusCode: 201, body: await conversations(deps).getOrCreate(id) };
+}
+
+async function confirmConversationPlan(req: ChannelRequest, deps: HandlerDependencies): Promise<ChannelResponse> {
+  const body = req.body as { version?: unknown; planId?: unknown } | undefined;
+  const version = body?.version;
+  if (!Number.isSafeInteger(version) || (version as number) < 1) return badRequest("方案版本无效");
+  if (body?.planId !== undefined && (typeof body.planId !== "string" || !body.planId)) return badRequest("候选方案 ID 无效");
+  try { return { body: await conversations(deps).confirmPlan(req.params.id, version as number, body?.planId as string | undefined) }; }
+  catch (error) { return { statusCode: 409, body: { error: error instanceof Error ? error.message : String(error),
+    message: "只能确认当前方案版本" } }; }
 }
 
 /** 分层列表 */
@@ -342,7 +397,7 @@ async function removeProfile(req: ChannelRequest): Promise<ChannelResponse> {
 
 /** 指标快照 */
 async function getMetrics(_req: ChannelRequest): Promise<ChannelResponse> {
-  return { body: metrics.snapshot() };
+  return { body: { ...metrics.snapshot(), runtime: defaultAgentRuntime.router.snapshot(), subscribers: defaultAgentEventBus.snapshot?.() } };
 }
 
 /** 读取运行时开关 */
@@ -390,6 +445,11 @@ export function buildChannelRoutes(
       summary: "SSE 流式决策",
     },
     { method: "GET", path: "/api/segments", handler: segments, summary: "分层列表" },
+    { method: "POST", path: "/api/decide/answer", handler: req => answerFollowUp(req, deps), summary: "提交追问回答并继续原运行" },
+    { method: "GET", path: "/api/conversations", handler: req => listConversations(req, deps), summary: "会话列表" },
+    { method: "POST", path: "/api/conversations", handler: req => createConversation(req, deps), summary: "创建可恢复会话" },
+    { method: "GET", path: "/api/conversations/:id", handler: req => getConversation(req, deps), summary: "恢复会话" },
+    { method: "POST", path: "/api/conversations/:id/confirm", handler: req => confirmConversationPlan(req, deps), summary: "确认当前方案" },
     { method: "GET", path: "/api/profiles", handler: listProfiles, summary: "画像列表" },
     { method: "POST", path: "/api/profiles", handler: upsertProfile, summary: "创建画像" },
     { method: "GET", path: "/api/profiles/:id", handler: getProfile, summary: "获取画像" },

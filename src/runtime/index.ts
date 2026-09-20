@@ -42,11 +42,30 @@ export type {
   ToolRegistryLike,
 } from "./tool-executor.js";
 
-export { InMemoryTraceCollector, appendTraceEvent } from "./trace.js";
+export {
+  InMemoryAgentEventCollector,
+  appendAgentEvent,
+  createAgentEvent,
+} from "./trace.js";
+export type { AgentEventCollector } from "./trace.js";
+export { getAgentRunProjection } from "./trace.js";
+export { createAgentRunProjection, reduceAgentEvent, replayAgentEvents } from "./event-reducer.js";
+export type { AgentRunProjection } from "./event-reducer.js";
 
-export { InMemoryRuntimeEventBus, defaultRuntimeEventBus } from "./event-bus.js";
-export type { EventSubscription, RuntimeEventBus } from "./event-bus.js";
-export type { TraceCollector, TraceEvent, TraceEventType } from "./trace.js";
+export { InMemoryAgentEventBus, defaultAgentEventBus } from "./event-bus.js";
+export type {
+  AgentEventBus,
+  AgentEventSubscriber,
+  AgentEventSubscription,
+  DeliveryReport,
+} from "./event-bus.js";
+export type {
+  AgentEvent,
+  AgentEventCategory,
+  AgentEventInput,
+  AgentEventScope,
+  AgentEventType,
+} from "../../spec/agent-event.js";
 
 export { CircuitBreakerRegistry, defaultCircuitBreakerRegistry } from "./circuit-breaker.js";
 export type {
@@ -87,3 +106,17 @@ export { SessionSubmissionLoop, createSessionSubmissionLoop } from "./submission
 export type { SubmissionLoopHandlers } from "./submission-loop.js";
 
 export { linkAbortSignal, throwIfAborted } from "./abort.js";
+
+export {
+  ensureAgentRunCreated,
+  isTerminalAgentRunStatus,
+  requestAgentRunCancellation,
+  transitionAgentRunStatus,
+} from "./lifecycle.js";
+export type { RunTransitionContext } from "./lifecycle.js";
+
+export { AgentRun } from "./agent-run.js";
+export type {
+  AgentRunTransitionContext,
+  CreateAgentRunOptions,
+} from "./agent-run.js";

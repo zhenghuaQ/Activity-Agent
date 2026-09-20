@@ -1,11 +1,21 @@
 import { describe, it, expect } from "vitest";
-import { runFullPipeline } from "../src/planner/engine.js";
+import { runFullPipeline, runFullPipelineStreaming } from "../src/planner/engine.js";
+import { replayAgentEvents } from "../src/runtime/event-reducer.js";
 import { parseIntent } from "../src/intent/parser.js";
 import { ALL_DIMENSIONS } from "../spec/decision.js";
 
 // 端到端：用 Mock 解析器（确定性，不依赖 LLM/网络）跑完整 5 阶段，
 // 校验 M2 决策产出（多维评分 / 帕累托 / 可解释 / 置信度）已正确装配。
 describe("runFullPipeline 端到端决策", () => {
+  it("异步 stage 回调失败后继续交付，并在调用边界报告失败", async () => {
+    const stages: string[] = [];
+    await expect(runFullPipelineStreaming("朋友下午逛展", parseIntent, {}, async event => {
+      await Promise.resolve();
+      stages.push(event.stage);
+      if (stages.length === 1) throw new Error("stage_callback_failed");
+    })).rejects.toThrow("stage_callback_failed");
+    expect(stages).toContain("fine_scheduling");
+  });
   it("产出带多维评分与帕累托方案的决策", async () => {
     const result = await runFullPipeline(
       "周末带老婆孩子下午出去玩4个小时，预算适中",
@@ -14,6 +24,7 @@ describe("runFullPipeline 端到端决策", () => {
 
     expect(result.success).toBe(true);
     expect(result.agentState.status).toBe("completed");
+    expect(replayAgentEvents(JSON.parse(JSON.stringify(result.agentState.trace))).status).toBe("completed");
     expect(result.agentState.runId).toBeTruthy();
     expect(result.agentState.sessionId).toBeTruthy();
     expect(result.agentState.traceId).toBeTruthy();
@@ -95,9 +106,15 @@ describe("runFullPipeline 端到端决策", () => {
 
   it("runs the legacy API through ActivityPlanner", async () => {
     const result = await runFullPipeline("朋友下午逛展", parseIntent);
-    const started = result.agentState.trace.find((event) => event.type === "run_started");
+    const started = result.agentState.trace.find((event) =>
+      event.type === "run_status_changed" && event.payload?.status === "running"
+    );
 
-    expect(started?.metadata?.planner).toBe("activity");
+    expect(started?.payload).toMatchObject({
+      previousStatus: "pending",
+      status: "running",
+      source: "planner",
+    });
     expect(result.agentState.trace.filter((event) => event.type === "plan_created"))
       .toHaveLength(1);
     expect(result.agentState.trace.filter((event) => event.type === "final"))

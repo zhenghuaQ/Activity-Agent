@@ -28,6 +28,7 @@ export type SubmissionOp =
   | { type: "turn" }
   | { type: "health_check" }
   | { type: "inspect_run"; runId: RunId }
+  | { type: "answer"; runId: RunId; requestId: string; answers: import("../../spec/follow-up.js").FollowUpSelection[] }
   | { type: "cancel"; runId: RunId };
 
 export type SubmissionStatus =

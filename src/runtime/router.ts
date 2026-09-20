@@ -3,11 +3,11 @@
 // ============================================================
 
 import {
-  createAgentState,
   newAgentId,
   type AgentRunStatus,
   type RunId,
 } from "../../spec/agent.js";
+import { randomUUID } from "node:crypto";
 import { type PipelineOptions } from "../planner/engine.js";
 import {
   defaultActivityPlanner,
@@ -28,36 +28,71 @@ import {
 import {
   createSessionSubmissionLoop,
   type SessionSubmissionLoop,
+  type SubmissionLoopLimits,
 } from "./submission-loop.js";
+import { AgentRun } from "./agent-run.js";
+import {
+  defaultAgentEventBus,
+  type AgentEventBus,
+} from "./event-bus.js";
+import { isFollowUpQuestions, validateFollowUpAnswers, type FollowUpSelection } from "../../spec/follow-up.js";
+import type { FollowUpQuestion } from "../../spec/types.js";
+import { throwIfAborted } from "./abort.js";
 
 interface ActiveRun {
   runId: RunId;
   submissionId: string;
   sessionId: string;
-  status: AgentRunStatus;
+  readonly status: AgentRunStatus;
   controller: AbortController;
+  run: AgentRun;
+  pendingInput?: {
+    requestId: string;
+    questions: FollowUpQuestion[];
+    expiresAt: number;
+    resolve: (answers: FollowUpSelection[]) => void;
+  };
 }
 
 export interface AgentRuntimeOptions {
+  limits?: SubmissionLoopLimits & { maxConcurrentRuns?: number; maxSessionLoops?: number };
   sessionStore?: InMemorySessionStore;
   userId?: string;
   runOptions?: PipelineOptions;
   planner?: Pick<ActivityPlanner, "run">;
+  eventBus?: AgentEventBus;
 }
 
 export class SubmissionRouter {
   private readonly activeRuns = new Map<RunId, ActiveRun>();
   private readonly loops = new Map<string, SessionSubmissionLoop>();
+  private executing = 0;
+  private rejected = 0;
+  private stopped = false;
 
   constructor(
     private readonly options: AgentRuntimeOptions = {},
-  ) {}
+  ) {
+    for (const value of Object.values(options.limits ?? {})) {
+      if (!Number.isSafeInteger(value) || value! < 1) throw new Error("invalid_runtime_limit");
+    }
+  }
+
+  snapshot() {
+    return { activeRuns: this.executing, sessions: this.loops.size,
+      queued: [...this.loops.values()].reduce((sum, loop) => sum + loop.queuedCount(), 0), rejected: this.rejected };
+  }
 
   /**
    * Control plane 入口：turn / cancel / inspect 先进入对应 Session 的 loop。
    * health_check 属于全局操作，不需要创建 AgentRun，因此直接处理。
    */
   async dispatch(submission: Submission): Promise<SubmissionResult> {
+    if (this.stopped || (!this.loops.has(submission.sessionId) && this.loops.size >= (this.options.limits?.maxSessionLoops ?? 128))) {
+      this.rejected++;
+      return { submissionId: submission.id, sessionId: submission.sessionId, traceId: submission.traceId,
+        status: "rejected", error: this.stopped ? "runtime_stopped" : "runtime_session_capacity" };
+    }
     if (submission.op.type === "health_check") {
       return {
         submissionId: submission.id,
@@ -70,6 +105,7 @@ export class SubmissionRouter {
 
     const loop = this.getLoop(submission.sessionId);
     const result = await loop.submit(submission);
+    if (result.status === "rejected") this.rejected++;
     await Promise.resolve();
     if (loop.isIdle() && this.loops.get(submission.sessionId) === loop) {
       this.loops.delete(submission.sessionId);
@@ -82,9 +118,18 @@ export class SubmissionRouter {
     if (loop) return loop;
 
     loop = createSessionSubmissionLoop(sessionId, {
-      executeTurn: (submission, controller) => this.executeTurn(submission, controller),
+      onIdle: () => { if (this.loops.get(sessionId) === loop) this.loops.delete(sessionId); },
+      executeTurn: async (submission, controller) => {
+        if (controller.signal.aborted || this.executing >= (this.options.limits?.maxConcurrentRuns ?? 16)) {
+          return { submissionId: submission.id, sessionId: submission.sessionId, traceId: submission.traceId,
+            status: "rejected", error: controller.signal.aborted ? "submission_cancelled" : "runtime_capacity" };
+        }
+        this.executing++;
+        try { return await this.executeTurn(submission, controller); }
+        finally { this.executing--; }
+      },
       executeControl: (submission) => this.executeControl(submission),
-    });
+    }, this.options.limits);
     this.loops.set(sessionId, loop);
     return loop;
   }
@@ -100,18 +145,43 @@ export class SubmissionRouter {
     );
 
     const runId = newAgentId("run");
+    const run = AgentRun.create(
+      { rawText: submission.input.content, config: submission.input.config },
+      {
+        runId,
+        sessionId: submission.sessionId,
+        traceId: submission.traceId,
+        eventBus: this.options.eventBus ?? defaultAgentEventBus,
+      },
+    );
+    const agentState = run.state;
     const active: ActiveRun = {
       runId,
       submissionId: submission.id,
       sessionId: submission.sessionId,
-      status: "pending",
+      get status() {
+        return run.state.status;
+      },
       controller,
+      run,
     };
 
     this.activeRuns.set(runId, active);
+    const onAbort = () => {
+      const reason = controller.signal.reason instanceof Error
+        ? controller.signal.reason.message
+        : String(controller.signal.reason ?? "user_cancelled");
+      run.requestCancellation(reason, "transport");
+    };
+    if (controller.signal.aborted) onAbort();
+    else controller.signal.addEventListener("abort", onAbort, { once: true });
 
     try {
-      active.status = "running";
+      run.transition("running", {
+        reason: "submission_started",
+        source: "runtime",
+        details: { submissionId: submission.id },
+      });
       const config = submission.input.config ?? {};
       const parseFn = typeof config.parseFn === "function"
         ? (config.parseFn as (text: string) => import("../../spec/types.js").StructuredConstraints)
@@ -132,6 +202,9 @@ export class SubmissionRouter {
       const date =
         (config.date as PipelineOptions["date"] | undefined)
         ?? this.options.runOptions?.date;
+      const baseConstraints =
+        (config.baseConstraints as PipelineOptions["baseConstraints"] | undefined)
+        ?? this.options.runOptions?.baseConstraints;
       const runOptions: PipelineOptions = {
         ...(this.options.runOptions ?? {}),
         ...configuredRunOptions,
@@ -139,19 +212,19 @@ export class SubmissionRouter {
         ...(autoSegment !== undefined ? { autoSegment } : {}),
         ...(weather !== undefined ? { weather } : {}),
         ...(date !== undefined ? { date } : {}),
+        ...(baseConstraints !== undefined ? { baseConstraints } : {}),
         runId,
         sessionId: submission.sessionId,
         traceId: submission.traceId,
         signal: controller.signal,
+        requestFollowUp: config.interactive === true
+          ? questions => this.waitForAnswers(active, submission, questions)
+          : undefined,
       };
-      const agentState = createAgentState(
-        { rawText: submission.input.content, config: submission.input.config },
-        { runId, sessionId: submission.sessionId, traceId: submission.traceId },
-      );
       const planner = this.options.planner ?? defaultActivityPlanner;
-      const pipelineResult = await planner.run(agentState, {
+      const pipelineResult = await planner.run(run, {
         ...runOptions,
-        parseFn,
+        parseFn: parseFn ?? runOptions.parseFn,
       });
 
       for (const message of pipelineResult.agentState.messages.filter(
@@ -160,10 +233,24 @@ export class SubmissionRouter {
         sessionStore.appendMessage(session.id, message);
       }
 
-      active.status = pipelineResult.success ? "completed" : "failed";
+      const finalStatus: AgentRunStatus = pipelineResult.agentState.status === "cancelled"
+        ? "cancelled"
+        : pipelineResult.success
+          ? "completed"
+          : "failed";
+      run.finish(
+        finalStatus,
+        agentState.result ?? { success: pipelineResult.success, message: pipelineResult.message },
+        {
+          reason: "submission_finished",
+          source: "runtime",
+          details: { submissionId: submission.id, success: pipelineResult.success },
+        },
+        { source: "runtime" },
+      );
       return {
         submissionId: submission.id,
-        status: pipelineResult.success ? "completed" : "failed",
+        status: finalStatus === "completed" ? "completed" : "failed",
         runId,
         sessionId: submission.sessionId,
         traceId: submission.traceId,
@@ -171,20 +258,34 @@ export class SubmissionRouter {
       };
     } catch (error) {
       const cancelled = controller.signal.aborted;
-      active.status = cancelled ? "cancelled" : "failed";
+      const message = cancelled
+        ? `运行已取消：${controller.signal.reason instanceof Error ? controller.signal.reason.message : String(controller.signal.reason ?? "user_cancelled")}`
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      if (!run.isTerminal()) {
+        run.emit({
+          type: "error",
+          payload: { message, cancelled, source: "runtime" },
+        });
+        const terminalStatus = cancelled ? "cancelled" : "failed";
+        run.finish(
+          terminalStatus,
+          { success: false, message },
+          { reason: message, source: "runtime", details: { submissionId: submission.id } },
+          { source: "runtime" },
+        );
+      }
       return {
         submissionId: submission.id,
         status: "failed",
         runId,
         sessionId: submission.sessionId,
         traceId: submission.traceId,
-        error: cancelled
-          ? `运行已取消：${controller.signal.reason instanceof Error ? controller.signal.reason.message : String(controller.signal.reason ?? "user_cancelled")}`
-          : error instanceof Error
-            ? error.message
-            : String(error),
+        error: message,
       };
     } finally {
+      controller.signal.removeEventListener("abort", onAbort);
       this.activeRuns.delete(runId);
       if (submission.sessionRetention === "ephemeral") {
         sessionStore.remove(submission.sessionId);
@@ -197,6 +298,23 @@ export class SubmissionRouter {
 
   private async executeControl(submission: Submission): Promise<SubmissionResult> {
     switch (submission.op.type) {
+      case "answer": {
+        const active = this.ownedRun(submission.sessionId, submission.op.runId);
+        const pending = active?.pendingInput;
+        const reject = (error: string): SubmissionResult => ({ submissionId: submission.id,
+          sessionId: submission.sessionId, traceId: submission.traceId, status: "rejected", error });
+        if (!active || !pending || active.status !== "waiting_input" || active.controller.signal.aborted
+          || pending.requestId !== submission.op.requestId || Date.now() >= pending.expiresAt) return reject("follow_up_not_pending");
+        let answers: FollowUpSelection[];
+        try { answers = validateFollowUpAnswers(pending.questions, submission.op.answers); }
+        catch { return reject("invalid_follow_up_answers"); }
+        active.run.emit({ type: "follow_up_answered", payload: { requestId: pending.requestId, questionIds: answers.map(a => a.questionId) } });
+        active.run.transition("running", { source: "control", reason: "follow_up_answered" });
+        active.pendingInput = undefined; // 同步认领，重复/过期回答不能再次推进运行。
+        pending.resolve(answers);
+        return { submissionId: submission.id, sessionId: submission.sessionId, traceId: submission.traceId,
+          runId: active.runId, status: "completed", result: { accepted: true, requestId: pending.requestId } };
+      }
       case "inspect_run": {
         const active = this.ownedRun(submission.sessionId, submission.op.runId);
         if (!active) return this.runNotFound(submission);
@@ -216,10 +334,33 @@ export class SubmissionRouter {
     }
   }
 
+  private async waitForAnswers(active: ActiveRun, submission: Submission, questions: FollowUpQuestion[]): Promise<FollowUpSelection[]> {
+    const signal = active.controller.signal;
+    throwIfAborted(signal);
+    if (active.pendingInput || !isFollowUpQuestions(questions)) throw new Error("invalid_follow_up_request");
+    const requestId = `question_${randomUUID()}`;
+    const expiresAt = submission.createdAt + (this.options.limits?.deadlineMs ?? 120_000);
+    if (Date.now() >= expiresAt) throw new Error("submission_deadline_exceeded");
+    let abort: () => void = () => {};
+    try {
+      return await new Promise<FollowUpSelection[]>((resolve, reject) => {
+        abort = () => { active.pendingInput = undefined; reject(signal.reason ?? new Error("run_aborted")); };
+        active.pendingInput = { requestId, questions: structuredClone(questions), expiresAt, resolve };
+        signal.addEventListener("abort", abort, { once: true });
+        active.run.transition("waiting_input", { source: "runtime", reason: "follow_up_requested" });
+        active.run.emit({ type: "follow_up_requested", payload: { requestId, expiresAt, questions } });
+      });
+    } finally {
+      signal.removeEventListener("abort", abort);
+      active.pendingInput = undefined;
+    }
+  }
+
   private handleCancel(submission: Submission, runId: RunId): SubmissionResult {
     const active = this.ownedRun(submission.sessionId, runId);
     if (!active) return this.runNotFound(submission);
 
+    active.run.requestCancellation("cancelled_by_submission", "control");
     active.controller.abort(new Error("cancelled_by_submission"));
     return {
       submissionId: submission.id,
@@ -251,6 +392,7 @@ export class SubmissionRouter {
   }
 
   shutdown(): void {
+    this.stopped = true;
     for (const loop of this.loops.values()) {
       loop.stop();
     }
@@ -260,9 +402,11 @@ export class SubmissionRouter {
 
 export class AgentRuntime {
   readonly router: SubmissionRouter;
+  readonly eventBus: AgentEventBus;
 
   constructor(options: AgentRuntimeOptions = {}) {
-    this.router = new SubmissionRouter(options);
+    this.eventBus = options.eventBus ?? defaultAgentEventBus;
+    this.router = new SubmissionRouter({ ...options, eventBus: this.eventBus });
   }
 
   async submit(
@@ -280,7 +424,7 @@ export class AgentRuntime {
     return this.submitSubmission(submission);
   }
 
-  /** 已标准化 Submission 的统一执行入口；SSE 等上层可先订阅事件再提交。 */
+  /** 已标准化 Submission 的统一执行入口；表现层可先注册 Subscriber 再提交。 */
   submitSubmission(submission: Submission): Promise<SubmissionResult> {
     return this.router.dispatch(submission);
   }

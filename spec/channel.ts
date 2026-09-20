@@ -55,7 +55,7 @@ export type ChannelHandler = (req: ChannelRequest) => Promise<ChannelResponse>;
  * 流式事件发射器：首帧发送前由 adapter 建立流（HTTP 即 hijack +
  * SSE 头），业务不感知协议细节。
  */
-export type ChannelEmitter = (event: string, data: unknown) => void;
+export type ChannelEmitter = (event: string, data: unknown) => void | Promise<void>;
 
 /**
  * 流式处理器：通过 emit 逐事件推送。

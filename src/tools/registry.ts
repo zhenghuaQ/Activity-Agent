@@ -10,6 +10,7 @@ import { SearchRestaurantsTool, CheckRestaurantAvailabilityTool } from "./restau
 import { SearchBreakPlacesTool } from "./breaks.js";
 import { GenerateFollowUpTool } from "./followup.js";
 import { EstimateTransitTool } from "./transit.js";
+import { ResolveDestinationTool } from "./destination.js";
 
 /** 宽松的 Tool 接口 — 用于注册表统一管理 */
 interface AnyTool {
@@ -25,6 +26,7 @@ class ToolRegistry {
 
   constructor() {
     const list: AnyTool[] = [
+      new ResolveDestinationTool(),
       new GetUserLocationTool(),
       new SearchAttractionsTool(),
       new SearchRestaurantsTool(),

@@ -3,7 +3,6 @@
 // ============================================================
 
 import {
-  createAgentState,
   type AgentState,
   type RunId,
   type SessionId,
@@ -13,8 +12,13 @@ import type {
   PlanningState,
   StructuredConstraints,
 } from "../../spec/types.js";
-import { defaultRuntimeEventBus } from "../runtime/event-bus.js";
+import type { AgentEvent } from "../../spec/agent-event.js";
+import {
+  defaultAgentEventBus,
+  type AgentEventSubscriber,
+} from "../runtime/event-bus.js";
 import { defaultActivityPlanner } from "./activity-planner.js";
+import { AgentRun } from "../runtime/agent-run.js";
 
 export interface PlanResult {
   success: boolean;
@@ -25,6 +29,8 @@ export interface PlanResult {
   agentState: AgentState;
 }
 export interface PipelineOptions {
+  requestFollowUp?: (questions: import("../../spec/types.js").FollowUpQuestion[]) => Promise<import("../../spec/follow-up.js").FollowUpSelection[]>;
+  baseConstraints?: StructuredConstraints;
   parseFn?: (text: string) => StructuredConstraints;
   runId?: RunId;
   sessionId?: SessionId;
@@ -54,6 +60,39 @@ const STAGE_TITLES: Record<PlanningStageName, string> = {
   fine_scheduling: "多维决策",
 };
 
+let nextStageSubscriberId = 0;
+
+/** 旧回调接口的兼容 Subscriber；串行交付由 EventBus 负责。 */
+class StageUpdateSubscriber implements AgentEventSubscriber {
+  readonly id: string;
+
+  constructor(
+    private readonly traceId: string,
+    private readonly onStage?: (event: StageEvent) => void | Promise<void>,
+  ) {
+    nextStageSubscriberId += 1;
+    this.id = `stage-callback:${traceId}:${nextStageSubscriberId}`;
+  }
+
+  matches(event: AgentEvent): boolean {
+    return event.scope.traceId === this.traceId && event.type === "stage_update";
+  }
+
+  handle(event: AgentEvent): void | Promise<void> {
+    if (event.type !== "stage_update") return;
+    const stage = event.payload.stage as PlanningStageName;
+    if (!this.onStage || !stage || !(stage in STAGE_TITLES)) return;
+    const stageEvent: StageEvent = {
+      stage,
+      index: event.payload.index,
+      total: event.payload.total,
+      message: STAGE_TITLES[stage],
+      data: event.payload.data,
+    };
+    return this.onStage(stageEvent);
+  }
+}
+
 export {
   stage1_parseIntent,
   stage2_followUp,
@@ -68,44 +107,43 @@ export async function runFullPipeline(
   parseFn?: (text: string) => StructuredConstraints,
   opts: PipelineOptions = {},
 ): Promise<PlanResult> {
-  const agentState = createAgentState(
+  const run = AgentRun.create(
     { rawText, config: { ...opts } },
-    { runId: opts.runId, sessionId: opts.sessionId, traceId: opts.traceId },
+    {
+      runId: opts.runId,
+      sessionId: opts.sessionId,
+      traceId: opts.traceId,
+      eventBus: defaultAgentEventBus,
+    },
   );
-  return defaultActivityPlanner.run(agentState, { ...opts, parseFn });
+  return defaultActivityPlanner.run(run, { ...opts, parseFn });
 }
 
-/** @deprecated Runtime 入口请使用 ActivityPlanner.run()；SSE 请消费 Runtime EventBus。 */
+/** @deprecated Runtime 入口请使用 ActivityPlanner.run()；流式协议请注册 AgentEvent Subscriber。 */
 export async function runFullPipelineStreaming(
   rawText: string,
   parseFn: ((text: string) => StructuredConstraints) | undefined,
   opts: PipelineOptions = {},
   onStage?: (event: StageEvent) => void | Promise<void>,
 ): Promise<PlanResult> {
-  const agentState = createAgentState(
+  const run = AgentRun.create(
     { rawText, config: { ...opts } },
-    { runId: opts.runId, sessionId: opts.sessionId, traceId: opts.traceId },
+    {
+      runId: opts.runId,
+      sessionId: opts.sessionId,
+      traceId: opts.traceId,
+      eventBus: defaultAgentEventBus,
+    },
   );
-  const subscription = defaultRuntimeEventBus.subscribe(agentState.traceId);
-  const runPromise = defaultActivityPlanner.run(agentState, { ...opts, parseFn });
+  const subscriber = new StageUpdateSubscriber(run.state.traceId, onStage);
+  const subscription = defaultAgentEventBus.subscribe(subscriber);
 
   try {
-    for await (const event of subscription) {
-      if (event.type === "stage_update") {
-        const stage = event.metadata?.stage as PlanningStageName;
-        if (onStage && stage) {
-          await onStage({
-            stage,
-            index: Number(event.metadata?.index ?? 0),
-            total: Number(event.metadata?.total ?? 0),
-            message: STAGE_TITLES[stage],
-            data: event.metadata?.data as Record<string, unknown> | undefined,
-          });
-        }
-      }
-      if (event.type === "final") break;
-    }
-    return await runPromise;
+    const result = await defaultActivityPlanner.run(run, { ...opts, parseFn });
+    subscription.close();
+    const delivery = await subscription.drain();
+    if (delivery.failed || delivery.rejected) throw delivery.lastError;
+    return result;
   } finally {
     subscription.close();
   }

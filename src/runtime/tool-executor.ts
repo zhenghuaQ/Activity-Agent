@@ -14,7 +14,7 @@ import type { ToolResponse } from "../../spec/tool-response.js";
 import type { ToolErrorCode } from "../../spec/errors.js";
 import { ERROR_CODE_META } from "../../spec/errors.js";
 import { toolRegistry } from "../tools/registry.js";
-import { appendTraceEvent } from "./trace.js";
+import { AgentRun } from "./agent-run.js";
 import {
   defaultCircuitBreakerRegistry,
   CircuitBreakerRegistry,
@@ -91,6 +91,7 @@ function classifyFailure(
   let kind: ToolFailureKind;
   switch (code) {
     case "E_RESOURCE_NOT_FOUND":
+    case "E_DESTINATION_UNSUPPORTED":
       kind = "not_found";
       break;
     case "E_RESOURCE_EXHAUSTED":
@@ -190,7 +191,7 @@ function circuitOpenResponse<T>(
 }
 
 function recordToolCall(
-  state: AgentState,
+  run: AgentRun,
   toolName: string,
   input: unknown,
   response: ToolResponse<unknown>,
@@ -198,6 +199,7 @@ function recordToolCall(
   recovery?: AgentToolCall["recovery"],
   failure?: ToolFailure,
 ): void {
+  const state = run.state;
   const startedAt = response.stats.startedAt;
   const record: AgentToolCall = {
     id: newAgentId("toolcall"),
@@ -212,11 +214,11 @@ function recordToolCall(
   };
 
   state.toolCalls.push(record);
-  appendTraceEvent(state, {
+  run.emit({
     type: "tool_result",
     toolName,
     durationMs: response.stats.durationMs,
-    metadata: {
+    payload: {
       status: response.status,
       errorCode: record.errorCode,
       attempt,
@@ -245,20 +247,28 @@ const DEFAULT_FALLBACK_CODES: ToolErrorCode[] = [
 ];
 
 export class ToolExecutor {
+  private readonly run: AgentRun;
+  private readonly state: AgentState;
+
   constructor(
-    private readonly state: AgentState,
+    runOrState: AgentRun | AgentState,
     private readonly options: ToolExecutorOptions = {},
-  ) {}
+  ) {
+    this.run = runOrState instanceof AgentRun
+      ? runOrState
+      : AgentRun.fromState(runOrState);
+    this.state = this.run.state;
+  }
 
   async execute<TInput, TOutput>(
     toolName: string,
     input: TInput,
   ): Promise<ToolResponse<TOutput>> {
     const logicalCallId = newAgentId("toolrun");
-    appendTraceEvent(this.state, {
+    this.run.emit({
       type: "tool_call",
       toolName,
-      metadata: { input, logicalCallId },
+      payload: { input, logicalCallId },
     });
 
     const registry = this.options.registry ?? (toolRegistry as unknown as ToolRegistryLike);
@@ -271,11 +281,11 @@ export class ToolExecutor {
         "E_CIRCUIT_OPEN",
         response.status === "error" ? response.errorInfo.message : ERROR_CODE_META.E_CIRCUIT_OPEN.defaultMessage,
       );
-      recordToolCall(this.state, toolName, input, response, 0, undefined, failure);
-      appendTraceEvent(this.state, {
+      recordToolCall(this.run, toolName, input, response, 0, undefined, failure);
+      this.run.emit({
         type: "error",
         toolName,
-        metadata: { phase: "circuit_open", breakerState: permission.state },
+        payload: { phase: "circuit_open", breakerState: permission.state },
       });
       return response;
     }
@@ -296,7 +306,7 @@ export class ToolExecutor {
           Date.now(),
           0,
         );
-        recordToolCall(this.state, toolName, input, response, 1, undefined, failure);
+        recordToolCall(this.run, toolName, input, response, 1, undefined, failure);
         return response;
       }
 
@@ -351,7 +361,7 @@ export class ToolExecutor {
         lastResponse = response;
 
         if (response.status !== "error") {
-          recordToolCall(this.state, toolName, input, response, attempt);
+          recordToolCall(this.run, toolName, input, response, attempt);
           outcome = "success";
           return response;
         }
@@ -365,7 +375,7 @@ export class ToolExecutor {
           && Boolean(this.options.fallbacks?.[toolName]);
 
         recordToolCall(
-          this.state,
+          this.run,
           toolName,
           input,
           response,
@@ -375,10 +385,10 @@ export class ToolExecutor {
         );
 
         if (canRetry) {
-          appendTraceEvent(this.state, {
+          this.run.emit({
             type: "error",
             toolName,
-            metadata: {
+            payload: {
               phase: "tool_retry",
               attempt,
               nextAttempt: attempt + 1,
@@ -390,10 +400,10 @@ export class ToolExecutor {
 
         outcome = lastFailure.retryable ? "upstream_failure" : "neutral";
         if (canFallback) {
-          appendTraceEvent(this.state, {
+          this.run.emit({
             type: "error",
             toolName,
-            metadata: { phase: "tool_fallback", attempt, failure: lastFailure },
+            payload: { phase: "tool_fallback", attempt, failure: lastFailure },
           });
 
           const fallbackResponse = await this.options.fallbacks![toolName]({
@@ -405,7 +415,7 @@ export class ToolExecutor {
           });
 
           recordToolCall(
-            this.state,
+            this.run,
             toolName,
             input,
             fallbackResponse,
@@ -418,10 +428,10 @@ export class ToolExecutor {
                 )
               : undefined,
           );
-          appendTraceEvent(this.state, {
+          this.run.emit({
             type: "tool_result",
             toolName,
-            metadata: {
+            payload: {
               recovery: "fallback",
               recovered: fallbackResponse.status !== "error",
             },

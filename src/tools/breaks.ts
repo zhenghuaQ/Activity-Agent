@@ -10,6 +10,7 @@ import type * as T from "../../spec/tools.js";
 import { SEARCH_BREAK_PLACES_TOOL } from "../../spec/tools.js";
 import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { getDataSource } from "../data/index.js";
+import { rethrowProviderError } from "./provider-errors.js";
 
 export class SearchBreakPlacesTool extends BaseTool<
   T.SearchBreakPlacesInput,
@@ -21,11 +22,11 @@ export class SearchBreakPlacesTool extends BaseTool<
 
   async run(input: T.SearchBreakPlacesInput, context?: ToolExecutionContext): Promise<BreakPlace[]> {
     const ds = getDataSource();
-    let results = await ds.searchBreakPlaces({
-      origin: input.distance.homeLocation,
-      radiusKm: input.distance.maxKm,
-      breakSubtype: input.breakSubtype,
-    }, context?.signal);
+    let results: BreakPlace[];
+    try { results = await ds.searchBreakPlaces({
+      origin: input.distance.homeLocation, destination: input.destination, searchArea: input.searchArea,
+      radiusKm: input.distance.maxKm, breakSubtype: input.breakSubtype,
+    }, { signal: context?.signal }); } catch (error) { rethrowProviderError(error); }
 
     // 老年人 → 需要无障碍
     if (input.hasElderly) {

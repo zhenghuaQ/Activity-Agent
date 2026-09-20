@@ -83,17 +83,16 @@ export function applyReplanPatch(
 ): AgentState {
   if (!patch) return state;
 
-  return {
-    ...state,
-    constraintEvaluations: [],
-    planning: {
-      stage: "candidate_generation",
-      constraints: state.planning.constraints,
-      followUpQuestions: state.planning.followUpQuestions,
-      planningNotes: state.planning.planningNotes,
-      errors: [],
-      searchPolicy: { radiusKm: patch.searchRadiusKm },
-      planRevision: (state.planning.planRevision ?? 0) + 1,
-    },
+  state.constraintEvaluations = [];
+  state.planning = {
+    stage: "candidate_generation",
+    constraints: state.planning.constraints,
+    followUpQuestions: state.planning.followUpQuestions,
+    planningNotes: state.planning.planningNotes,
+    resolvedSearchArea: state.planning.resolvedSearchArea,
+    errors: [],
+    searchPolicy: { radiusKm: patch.searchRadiusKm },
+    planRevision: (state.planning.planRevision ?? 0) + 1,
   };
+  return state;
 }

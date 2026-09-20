@@ -16,6 +16,7 @@ import type {
   UserPreferences,
 } from "../../spec/types.js";
 import { HOME } from "../data/mock.js";
+import { extractDestination, extractPreferredCuisine } from "../conversation/memory.js";
 
 /**
  * Mock LLM 意图解析。
@@ -40,8 +41,10 @@ export function parseIntent(rawText: string): StructuredConstraints {
 
   // ─── 主导角色识别 ─────────────────────────────
   let leadRole: LeadRole = "friends_group";
-  const hasChild = lower.includes("孩子") || lower.includes("小孩") || lower.includes("儿子") || lower.includes("女儿") || /\d+岁/.test(lower);
-  const hasElderly = lower.includes("老人") || lower.includes("爸妈") || lower.includes("父母") || lower.includes("爷爷奶奶");
+  const hasChild = (lower.includes("孩子") || lower.includes("小孩") || lower.includes("儿子") || lower.includes("女儿") || /\d+岁/.test(lower))
+    && !/(不带|不用带|不和|不跟)(孩子|小孩|儿子|女儿)/.test(lower);
+  const hasElderly = (lower.includes("老人") || lower.includes("爸妈") || lower.includes("父母") || lower.includes("爷爷奶奶"))
+    && !/(不带|不用带|不和|不跟)(爸妈|父母|老人|爷爷奶奶)/.test(lower);
 
   if (hasChild && hasElderly) {
     leadRole = "mixed_family";
@@ -76,7 +79,11 @@ export function parseIntent(rawText: string): StructuredConstraints {
 
   const preferences: UserPreferences = {
     dieting,
+    budget: lower.includes("预算充裕") || lower.includes("贵一点") || /人均\s*(?:[4-9]\d{2}|[1-9]\d{3,})/.test(lower) ? "high"
+      : lower.includes("预算适中") || lower.includes("人均100-200") || /人均\s*(?:1\d{2}|2\d{2}|3\d{2})/.test(lower) ? "medium"
+        : lower.includes("省钱") || /省(?:一)?(?:点|些)/.test(lower) || lower.includes("便宜") || lower.includes("人均100以内") || /人均\s*\d{1,2}(?:\D|$)/.test(lower) ? "low" : undefined,
     dietaryRestrictions,
+    preferredCuisine: extractPreferredCuisine(lower),
     inferredDietary,
   };
 
@@ -113,8 +120,11 @@ export function parseIntent(rawText: string): StructuredConstraints {
   if (lower.includes("鲜花") || lower.includes("花")) extraHints.push("鲜花");
   if (lower.includes("拍照")) extraHints.push("拍照打卡");
   if (lower.includes("浪漫")) extraHints.push("浪漫");
+  if (lower.includes("美食约会")) extraHints.push("美食", "浪漫");
+  if (lower.includes("经典城市") || lower.includes("城市地标")) extraHints.push("城市地标", "历史文化");
+  if (lower.includes("休闲慢游") || lower.includes("不要太赶") || lower.includes("少赶路")) extraHints.push("休闲慢游", "少赶路");
 
-  return { group, timeWindow, distance, extraHints };
+  return { destination: extractDestination(lower), group, timeWindow, distance, extraHints };
 }
 
 // ─── 辅助函数 ──────────────────────────────────────

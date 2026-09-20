@@ -12,6 +12,9 @@ import { ALL_CASES, type EvalCase } from "./cases.js";
 import { runBaseline } from "./baseline.js";
 import { runRuntime } from "./runtime.js";
 import type { EvalCaseResult, EvalComparison } from "./types.js";
+import { CONVERSATION_CASES } from "./conversation-cases.js";
+import { runConversationCase } from "./conversation.js";
+import { bootstrapMean, pairedBootstrapDifference, wilsonInterval } from "./statistics.js";
 
 function compare(
   baseline: EvalCaseResult,
@@ -94,6 +97,54 @@ async function main() {
   console.log(`  Avg replans        Baseline 0.0  |  Runtime ${avg(comparisons.map(c => c.runtime.replanCount)).toFixed(1)}`);
   console.log(`  Avg trace events   Baseline 0.0  |  Runtime ${avg(comparisons.map(c => c.runtime.traceEvents)).toFixed(1)}`);
   console.log("=".repeat(78));
+
+  console.log("\nMulti-turn conversation evaluation (task is the sampling unit)");
+  const stateless = [];
+  const memory = [];
+  for (const testCase of CONVERSATION_CASES) {
+    const baselineResult = await runConversationCase(testCase, false);
+    const memoryResult = await runConversationCase(testCase, true);
+    stateless.push(baselineResult);
+    memory.push(memoryResult);
+    console.log(
+      `  ${testCase.name.padEnd(30)} task=${memoryResult.taskSuccess ? "yes" : "no"} `
+      + `memory=${memoryResult.memoryErrors}/${memoryResult.memoryChecks} `
+      + `hard=${memoryResult.hardConstraintViolations}/${memoryResult.hardConstraintChecks} `
+      + `preference=${memoryResult.preferenceMatches}/${memoryResult.preferenceChecks} `
+      + `latency=${memoryResult.durationMs}ms turns=${memoryResult.turns}`
+      + (memoryResult.errors.length ? ` errors=${memoryResult.errors.join(",")}` : ""),
+    );
+  }
+
+  const task = wilsonInterval(memory.filter((value) => value.taskSuccess).length, memory.length);
+  const memoryChecks = memory.reduce((sum, value) => sum + value.memoryChecks, 0);
+  const memoryErrors = memory.reduce((sum, value) => sum + value.memoryErrors, 0);
+  const hardChecks = memory.reduce((sum, value) => sum + value.hardConstraintChecks, 0);
+  const hardErrors = memory.reduce((sum, value) => sum + value.hardConstraintViolations, 0);
+  const memoryTaskRate = wilsonInterval(
+    memory.filter((value) => value.memoryErrors > 0).length,
+    memory.length,
+  );
+  const hardTaskRate = wilsonInterval(
+    memory.filter((value) => value.hardConstraintViolations > 0).length,
+    memory.length,
+  );
+  const latency = bootstrapMean(memory.map((value) => value.durationMs));
+  const preference = bootstrapMean(memory.filter((value) => value.preferenceChecks > 0)
+    .map((value) => value.preferenceMatches / value.preferenceChecks));
+  const latencyDelta = pairedBootstrapDifference(
+    stateless.map((value) => value.durationMs),
+    memory.map((value) => value.durationMs),
+  );
+  const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
+  console.log(`  Primary task success       ${pct(task.estimate)} (95% Wilson ${pct(task.lower)}–${pct(task.upper)}, tasks=${task.n})`);
+  console.log(`  Tasks with memory error    ${pct(memoryTaskRate.estimate)} (95% Wilson ${pct(memoryTaskRate.lower)}–${pct(memoryTaskRate.upper)}, raw=${memoryErrors}/${memoryChecks} checks)`);
+  console.log(`  Tasks with hard violation  ${pct(hardTaskRate.estimate)} (95% Wilson ${pct(hardTaskRate.lower)}–${pct(hardTaskRate.upper)}, raw=${hardErrors}/${hardChecks} checks)`);
+  console.log(`  Auxiliary preference coverage ${pct(preference.estimate)} (task bootstrap 95% ${pct(preference.lower)}–${pct(preference.upper)})`);
+  console.log(`  Auxiliary latency mean     ${latency.estimate.toFixed(0)}ms (task bootstrap 95% ${latency.lower.toFixed(0)}–${latency.upper.toFixed(0)}ms)`);
+  console.log(`  Paired latency Δ           ${latencyDelta.estimate.toFixed(0)}ms (95% task bootstrap ${latencyDelta.lower.toFixed(0)}–${latencyDelta.upper.toFixed(0)}ms)`);
+  console.log("  Note: turns/checks are clustered within tasks; confidence intervals therefore use tasks, not individual turns, as independent samples.");
+  console.log("  Note: this fixed suite is a development signal; expand and freeze a representative holdout before release gating.");
 
   // 这里不以“Runtime 必须优于 Baseline”作为退出条件。
   // Eval Harness 的职责是发现回归与量化权衡，而不是人为制造漂亮结果。

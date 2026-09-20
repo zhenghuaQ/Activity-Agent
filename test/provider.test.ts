@@ -3,10 +3,18 @@ import { MockProvider } from "../src/data/providers/mock-provider.js";
 import { AmapProvider } from "../src/data/providers/amap-provider.js";
 import { HOME } from "../src/data/mock.js";
 import type { GeoLocation } from "../spec/types.js";
+import { runProviderConformance } from "../src/data/conformance.js";
+import { DataProviderError } from "../src/data/provider-error.js";
 
 const mock = new MockProvider();
 
 describe("MockProvider", () => {
+  it("implements Provider v1 and resolves only supported destinations", async () => {
+    expect(mock.apiVersion).toBe(1);
+    expect((await mock.resolveDestination({ city: "北京" })).center.city).toBe("北京");
+    await expect(mock.resolveDestination({ city: "上海" })).rejects.toBeInstanceOf(DataProviderError);
+  });
+
   it("以 HOME 为出发点，景点按距离升序且 distanceKm 已重算", async () => {
     const list = await mock.searchAttractions({ origin: HOME, radiusKm: 15 });
     expect(list.length).toBeGreaterThan(0);
@@ -14,6 +22,7 @@ describe("MockProvider", () => {
     for (let i = 1; i < list.length; i++) {
       expect(list[i].distanceKm).toBeGreaterThanOrEqual(list[i - 1].distanceKm);
     }
+    expect(list.every(place => place.source?.providerId === "mock")).toBe(true);
   });
 
   it("换出发点后距离随之改变（证明动态计算）", async () => {
@@ -51,9 +60,15 @@ describe("MockProvider", () => {
     await expect(provider.searchAttractions({
       origin: { lat: 39.9, lng: 116.4, address: "北京", city: "北京" },
       radiusKm: 10,
-    }, controller.signal)).rejects.toThrow("user_cancelled");
+    }, { signal: controller.signal })).rejects.toThrow("user_cancelled");
     expect(fallbackSearch).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  it("passes the public provider conformance suite", async () => {
+    const report = await runProviderConformance(mock, { destination: { city: "北京" } });
+    expect(report.issues).toEqual([]);
+    expect(report.passed).toBe(true);
   });
 });

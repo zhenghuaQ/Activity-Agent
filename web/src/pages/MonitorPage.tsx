@@ -87,6 +87,12 @@ export default function MonitorPage() {
       )}
 
       {/* 指标卡片 */}
+      {metrics?.runtime && metrics.subscribers && <div className="card" style={{ marginBottom: 16 }}>
+        <div className="section-title">任务与事件交付</div>
+        <p>运行中 {metrics.runtime.activeRuns} · 排队 {metrics.runtime.queued} · 任务拒绝 {metrics.runtime.rejected}</p>
+        <p>订阅待处理 {metrics.subscribers.pending} · 交付失败 {metrics.subscribers.failed} · 交付拒绝 {metrics.subscribers.rejected}</p>
+        <p>累计处理耗时 {metrics.subscribers.processingMs}ms</p>
+      </div>}
       {metrics && (
         <div className="monitor-grid">
           <div className="metric-card">

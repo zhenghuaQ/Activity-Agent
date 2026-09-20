@@ -13,6 +13,7 @@ export type ToolErrorCode =
   // 资源相关
   | "E_RESOURCE_NOT_FOUND" // 资源不存在（景点/餐厅 ID 无效）
   | "E_RESOURCE_EXHAUSTED" // 资源耗尽（无余票/无座位）
+  | "E_DESTINATION_UNSUPPORTED" // 当前 Provider 不支持该目的地
   // 参数相关
   | "E_PARAM_MISSING" // 缺少必需参数
   | "E_PARAM_INVALID" // 参数非法（类型/取值/格式错误）
@@ -48,6 +49,11 @@ export const ERROR_CODE_META: Record<
     category: "resource",
     retryable: true,
     defaultMessage: "资源已耗尽（无余票/无座位）",
+  },
+  E_DESTINATION_UNSUPPORTED: {
+    category: "resource",
+    retryable: false,
+    defaultMessage: "当前地点数据源不支持该目的地",
   },
   E_PARAM_MISSING: {
     category: "param",

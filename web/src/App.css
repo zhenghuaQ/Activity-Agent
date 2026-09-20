@@ -99,6 +99,14 @@
 .decision-input-card {
   grid-column: 1 / -1;
 }
+.conversation-card { grid-column: 1 / -1; }
+.conversation-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.conversation-turns { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; max-height: 320px; overflow: auto; }
+.conversation-turn { max-width: 82%; padding: 10px 12px; border-radius: 10px; background: #f3f4f6; }
+.conversation-turn.user { align-self: flex-end; background: #fff4c2; }
+.conversation-turn.assistant { align-self: flex-start; }
+.turn-role { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+.plan-confirm-row { display: flex; justify-content: flex-end; margin-top: 12px; }
 
 .decision-input-row {
   display: flex;
@@ -304,11 +312,11 @@
 
 .type-attraction { background: #dbeafe; color: #1e40af; }
 .type-break { background: #fef3c7; color: #92400e; }
-.type-meal { background: #fee2e2; color: #991b1b; }
+.type-restaurant { background: #fee2e2; color: #991b1b; }
 
 .crowd-low { color: var(--success); }
 .crowd-medium { color: var(--warn); }
-.crowd-high { color: var(--danger); }
+.crowd-high, .crowd-packed { color: var(--danger); }
 
 /* ─── 雷达图 ─── */
 
@@ -582,6 +590,14 @@
 .notes-list ul {
   margin-left: 16px;
 }
+
+.follow-up-card { grid-column: 1 / -1; }
+.follow-up-card fieldset { margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
+.follow-up-card legend { font-weight: 600; padding: 0 6px; }
+.follow-up-card p, .follow-up-option small { color: var(--muted); font-size: 13px; }
+.follow-up-option { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; cursor: pointer; }
+.follow-up-option input { width: auto; margin-top: 4px; flex-shrink: 0; }
+.follow-up-option small { display: block; margin-top: 4px; }
 
 @media (max-width: 768px) {
   .decision-page {

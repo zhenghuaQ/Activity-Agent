@@ -85,8 +85,9 @@ ai-activity-agent/
 │   │   ├── mock.ts           # Mock 数据集
 │   │   ├── crowd.ts          # 拥挤度预测（启发式）
 │   │   ├── crowd-constants.ts # 拥挤度参数常量
-│   │   ├── index.ts          # 数据源工厂
-│   │   └── providers/        # 数据 Provider（Amap / Mock）
+│   │   ├── index.ts          # Provider Registry 与配置选择
+│   │   ├── conformance.ts    # 社区 Provider 黑盒合规测试
+│   │   └── providers/        # 数据 Provider（Mock / Amap / HTTP）
 │   ├── llm/                  # LLM 集成
 │   │   ├── config.ts         # LLM 客户端配置
 │   │   ├── intent.ts         # OpenAI function calling 意图解析
@@ -134,7 +135,7 @@ ai-activity-agent/
 ## 七、后续扩展方向
 
 - 增加天气 API → 动态调整室内/室外景点权重
-- 替换 Mock 数据为真实 LBS 数据源
+- 通过 ActivityDataProviderV1 接入真实 LBS 或社区地点数据源
 - 增加历史决策记录与用户反馈闭环
 
 ## 八、Runtime / Domain 边界

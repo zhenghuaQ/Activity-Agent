@@ -15,14 +15,19 @@ import type {
   Restaurant,
 } from "../../../spec/types.js";
 import type {
+  ActivityDataProviderV1,
   BreakPlaceQuery,
-  DataSource,
+  DestinationQuery,
   PlaceQuery,
+  ProviderCapabilities,
+  ProviderContext,
+  SearchArea,
 } from "../../../spec/datasource.js";
 import { withDistanceFrom } from "../../core/geo.js";
 import { TtlLruCache } from "../../core/cache.js";
 import { childLogger } from "../../core/logger.js";
 import { throwIfAborted } from "../../runtime/abort.js";
+import { searchCenter, withProviderSource } from "../provider-utils.js";
 
 const log = childLogger("data:amap");
 
@@ -67,15 +72,19 @@ function localFeaturesFromRating(rating: number): LocalFeatureTag[] {
 
 export interface AmapProviderOptions {
   apiKey: string;
-  fallback: DataSource;
+  fallback: ActivityDataProviderV1;
   /** 缓存 TTL（毫秒），默认 5 分钟 */
   ttlMs?: number;
 }
 
-export class AmapProvider implements DataSource {
+export class AmapProvider implements ActivityDataProviderV1 {
+  readonly apiVersion = 1 as const;
+  readonly id = "amap";
   readonly name = "amap";
+  readonly capabilities: ProviderCapabilities = { destinationResolution: true, attractions: true,
+    restaurants: true, breakPlaces: true, geocoding: true, lookupById: false };
   private readonly apiKey: string;
-  private readonly fallback: DataSource;
+  private readonly fallback: ActivityDataProviderV1;
   private readonly poiCache: TtlLruCache<AmapPoi[]>;
   private readonly geoCache: TtlLruCache<GeoLocation | null>;
 
@@ -123,17 +132,32 @@ export class AmapProvider implements DataSource {
     return { city: origin.city, district: origin.district };
   }
 
-  async searchAttractions(query: PlaceQuery, signal?: AbortSignal): Promise<Attraction[]> {
+  async resolveDestination(query: DestinationQuery, context: ProviderContext = {}): Promise<SearchArea> {
+    throwIfAborted(context.signal);
+    if (query.coordinates) {
+      return { destination: { ...query }, center: { ...query.coordinates, city: query.city,
+        district: query.district, address: `${query.city}${query.district ?? ""}` }, confidence: 1 };
+    }
+    const address = `${query.city}${query.district ?? ""}`;
+    const center = await this.geocode(address, context);
+    if (center) return { destination: { ...query }, center: { ...center, city: center.city || query.city,
+      district: center.district || query.district }, confidence: 0.95 };
+    return this.fallback.resolveDestination(query, context);
+  }
+
+  async searchAttractions(query: PlaceQuery, context: ProviderContext = {}): Promise<Attraction[]> {
+    const signal = context.signal;
     throwIfAborted(signal);
     try {
+      const center = searchCenter(query);
       const pois = await this.fetchAround(
-        query.origin,
+        center,
         TYPE_ATTRACTION,
         query.radiusKm,
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchAttractions(query, signal);
+      if (pois.length === 0) return this.fallback.searchAttractions(query, context);
 
       const items: Attraction[] = pois.flatMap((p) => {
         const coord = parseLocation(p.location);
@@ -147,7 +171,7 @@ export class AmapProvider implements DataSource {
           localFeatures: localFeaturesFromRating(rating),
           address: str(p.address) || str(p.name),
           distanceKm: 0,
-          location: { ...coord, address: str(p.address), ...this.toCity(query.origin) },
+          location: { ...coord, address: str(p.address), ...this.toCity(center) },
           rating,
           pricePerPerson: num(p.biz_ext?.cost, 0),
           durationMinutes: 120,
@@ -156,23 +180,25 @@ export class AmapProvider implements DataSource {
         };
         return [a];
       });
-      return this.applyFeatures(withDistanceFrom(query.origin, items), query);
+      return withProviderSource(this.id, this.applyFeatures(withDistanceFrom(center, items), query));
     } catch (err) {
-      return this.degrade(err, signal, () => this.fallback.searchAttractions(query, signal));
+      return this.degrade(err, signal, () => this.fallback.searchAttractions(query, context));
     }
   }
 
-  async searchRestaurants(query: PlaceQuery, signal?: AbortSignal): Promise<Restaurant[]> {
+  async searchRestaurants(query: PlaceQuery, context: ProviderContext = {}): Promise<Restaurant[]> {
+    const signal = context.signal;
     throwIfAborted(signal);
     try {
+      const center = searchCenter(query);
       const pois = await this.fetchAround(
-        query.origin,
+        center,
         TYPE_RESTAURANT,
         query.radiusKm,
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchRestaurants(query, signal);
+      if (pois.length === 0) return this.fallback.searchRestaurants(query, context);
 
       const items: Restaurant[] = pois.flatMap((p) => {
         const coord = parseLocation(p.location);
@@ -186,7 +212,7 @@ export class AmapProvider implements DataSource {
           localFeatures: localFeaturesFromRating(rating),
           address: str(p.address) || str(p.name),
           distanceKm: 0,
-          location: { ...coord, address: str(p.address), ...this.toCity(query.origin) },
+          location: { ...coord, address: str(p.address), ...this.toCity(center) },
           rating,
           pricePerPerson: num(p.biz_ext?.cost, 80),
           cuisine: str(p.type).split(";").pop() || "餐厅",
@@ -198,23 +224,25 @@ export class AmapProvider implements DataSource {
         };
         return [r];
       });
-      return this.applyFeatures(withDistanceFrom(query.origin, items), query);
+      return withProviderSource(this.id, this.applyFeatures(withDistanceFrom(center, items), query));
     } catch (err) {
-      return this.degrade(err, signal, () => this.fallback.searchRestaurants(query, signal));
+      return this.degrade(err, signal, () => this.fallback.searchRestaurants(query, context));
     }
   }
 
-  async searchBreakPlaces(query: BreakPlaceQuery, signal?: AbortSignal): Promise<BreakPlace[]> {
+  async searchBreakPlaces(query: BreakPlaceQuery, context: ProviderContext = {}): Promise<BreakPlace[]> {
+    const signal = context.signal;
     throwIfAborted(signal);
     try {
+      const center = searchCenter(query);
       const pois = await this.fetchAround(
-        query.origin,
+        center,
         TYPE_CAFE_TEA,
         query.radiusKm,
         query.keywords,
         signal
       );
-      if (pois.length === 0) return this.fallback.searchBreakPlaces(query, signal);
+      if (pois.length === 0) return this.fallback.searchBreakPlaces(query, context);
 
       const subtype = query.breakSubtype ?? "cafe";
       const items: BreakPlace[] = pois.flatMap((p) => {
@@ -230,7 +258,7 @@ export class AmapProvider implements DataSource {
           localFeatures: localFeaturesFromRating(rating),
           address: str(p.address) || str(p.name),
           distanceKm: 0,
-          location: { ...coord, address: str(p.address), ...this.toCity(query.origin) },
+          location: { ...coord, address: str(p.address), ...this.toCity(center) },
           rating,
           pricePerPerson: num(p.biz_ext?.cost, 40),
           durationMinutes: 45,
@@ -239,22 +267,23 @@ export class AmapProvider implements DataSource {
         };
         return [b];
       });
-      const withDist = withDistanceFrom(query.origin, items);
-      return this.applyFeatures(withDist, query);
+      const withDist = withDistanceFrom(center, items);
+      return withProviderSource(this.id, this.applyFeatures(withDist, query));
     } catch (err) {
-      return this.degrade(err, signal, () => this.fallback.searchBreakPlaces(query, signal));
+      return this.degrade(err, signal, () => this.fallback.searchBreakPlaces(query, context));
     }
   }
 
-  async getAttractionById(id: string, _signal?: AbortSignal): Promise<Attraction | undefined> {
-    return this.fallback.getAttractionById(id);
+  async getAttractionById(id: string, context?: ProviderContext): Promise<Attraction | undefined> {
+    return this.fallback.getAttractionById(id, context);
   }
 
-  async getRestaurantById(id: string, _signal?: AbortSignal): Promise<Restaurant | undefined> {
-    return this.fallback.getRestaurantById(id);
+  async getRestaurantById(id: string, context?: ProviderContext): Promise<Restaurant | undefined> {
+    return this.fallback.getRestaurantById(id, context);
   }
 
-  async geocode(address: string, signal?: AbortSignal): Promise<GeoLocation | null> {
+  async geocode(address: string, context: ProviderContext = {}): Promise<GeoLocation | null> {
+    const signal = context.signal;
     throwIfAborted(signal);
     try {
       return await this.geoCache.wrap(address, async () => {
@@ -269,7 +298,7 @@ export class AmapProvider implements DataSource {
         const g = json.geocodes?.[0];
         const coord = parseLocation(g?.location);
         if (json.status !== "1" || !coord) {
-          return this.fallback.geocode(address, signal);
+          return this.fallback.geocode(address, context);
         }
         return {
           ...coord,
@@ -281,7 +310,7 @@ export class AmapProvider implements DataSource {
     } catch (err) {
       throwIfAborted(signal);
       log.warn({ err: err instanceof Error ? err.message : String(err) }, "高德地理编码失败，降级");
-      return this.fallback.geocode(address, signal);
+      return this.fallback.geocode(address, context);
     }
   }
 

@@ -20,11 +20,15 @@ import { buildChannelRoutes } from "./handlers.js";
 import { metrics } from "./metrics.js";
 import { getRuntimeFlags } from "./flags.js";
 import { checkRateLimit } from "./ratelimit.js";
+import { registerAgentEventLogging } from "../observability/subscribers/logging-agent-event-subscriber.js";
+import { SseWriter } from "./sse-writer.js";
 
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 120);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
 
 export interface ServerOptions {
+  sseMaxBytes?: number;
+  sseDrainTimeoutMs?: number;
   rateLimitMax?: number;
   rateLimitWindowMs?: number;
 }
@@ -55,6 +59,7 @@ function applyChannelResponse(reply: FastifyReply, res: ChannelResponse) {
 }
 
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
+  registerAgentEventLogging();
   const app = Fastify({ logger: false });
   const rlMax = opts.rateLimitMax ?? RATE_LIMIT_MAX;
   const rlWindow = opts.rateLimitWindowMs ?? RATE_LIMIT_WINDOW_MS;
@@ -82,16 +87,16 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   });
 
   // ── 绑定 Channel 路由表 ──
-  registerRoutes(app, buildChannelRoutes());
+  registerRoutes(app, buildChannelRoutes(), opts);
 
   return app;
 }
 
 /** 把 ChannelRoute 绑定到 Fastify（普通 + 流式两种形态） */
-function registerRoutes(app: FastifyInstance, routes: ChannelRoute[]): void {
+function registerRoutes(app: FastifyInstance, routes: ChannelRoute[], opts: ServerOptions = {}): void {
   for (const route of routes) {
     if (route.stream) {
-      bindStreamRoute(app, route);
+      bindStreamRoute(app, route, opts);
     } else if (route.handler) {
       bindPlainRoute(app, route);
     }
@@ -121,7 +126,7 @@ function bindPlainRoute(app: FastifyInstance, route: ChannelRoute): void {
  * 流式路由（SSE）：emit 首帧时才 hijack 建流；
  * 未 emit 即返回（如校验 400）则按普通响应处理。
  */
-function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
+function bindStreamRoute(app: FastifyInstance, route: ChannelRoute, opts: ServerOptions): void {
   app.route({
     method: route.method,
     url: route.path,
@@ -130,6 +135,7 @@ function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
       const controller = new AbortController();
       const onClose = () => controller.abort(new Error("client_disconnected"));
       reply.raw.once("close", onClose);
+      const writer = new SseWriter(reply.raw, opts.sseMaxBytes, opts.sseDrainTimeoutMs);
 
       const emit = (event: string, data: unknown) => {
         if (controller.signal.aborted || reply.raw.destroyed) return;
@@ -143,12 +149,13 @@ function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
           });
           hijacked = true;
         }
-        reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        return writer.send(event, data);
       };
 
       let res: void | ChannelResponse;
       try {
         res = await route.stream!(toChannelRequest(req, controller.signal), emit);
+        await writer.drain();
       } finally {
         reply.raw.removeListener("close", onClose);
       }
@@ -168,12 +175,12 @@ function bindStreamRoute(app: FastifyInstance, route: ChannelRoute): void {
 export class FastifyChannelAdapter implements AgentChannelAdapter {
   readonly app: FastifyInstance;
 
-  constructor(opts: ServerOptions = {}) {
+  constructor(private readonly opts: ServerOptions = {}) {
     this.app = buildServer(opts);
   }
 
   register(routes: ChannelRoute[]): void {
-    registerRoutes(this.app, routes);
+    registerRoutes(this.app, routes, this.opts);
   }
 
   close(): Promise<void> {

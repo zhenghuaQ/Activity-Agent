@@ -15,6 +15,7 @@ import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
 import { getDataSource } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
+import { rethrowProviderError } from "./provider-errors.js";
 
 // ─── Tool 2: search_restaurants ────────────────────────
 
@@ -28,16 +29,19 @@ export class SearchRestaurantsTool extends BaseTool<
 
   async run(input: T.SearchRestaurantsInput, context?: ToolExecutionContext): Promise<Restaurant[]> {
     const ds = getDataSource();
-    let results = await ds.searchRestaurants({
-      origin: input.distance.homeLocation,
-      radiusKm: input.distance.maxKm,
-      localFeatures: input.localFeatures,
-    }, context?.signal);
+    let results: Restaurant[];
+    try { results = await ds.searchRestaurants({
+      origin: input.distance.homeLocation, destination: input.destination, searchArea: input.searchArea,
+      radiusKm: input.distance.maxKm, localFeatures: input.localFeatures,
+    }, { signal: context?.signal }); } catch (error) { rethrowProviderError(error); }
 
     // 忌口匹配
     const restrictions = input.dietaryRestrictions ?? [];
     if (restrictions.length > 0) {
       results = results.filter((r) => r.dietaryOptions);
+    }
+    if (restrictions.includes("低卡") && restrictions.includes("轻食")) {
+      results = results.filter(r => r.tags.includes("低卡") && r.tags.includes("轻食"));
     }
 
     // 偏好标签匹配
@@ -46,28 +50,14 @@ export class SearchRestaurantsTool extends BaseTool<
       results = results.filter((r) => tags.some((t) => r.tags.includes(t)));
     }
 
-    // 人群匹配 — 有老人的优先老年友好
-    if (input.group.ageGroup.seniors > 0) {
-      results.sort((a, b) => {
-        const aOk = a.tags.includes("老年餐") || a.tags.includes("清淡") ? 1 : 0;
-        const bOk = b.tags.includes("老年餐") || b.tags.includes("清淡") ? 1 : 0;
-        return bOk - aOk;
-      });
-    }
-
-    // 有幼年的优先儿童友好
-    if (input.group.ageGroup.youngChildren > 0) {
-      results.sort((a, b) => {
-        const aOk = a.tags.includes("儿童友好") ? 1 : 0;
-        const bOk = b.tags.includes("儿童友好") ? 1 : 0;
-        return bOk - aOk || b.rating - a.rating;
-      });
-    }
-
-    // 否则按评分降序
-    if (input.group.ageGroup.youngChildren === 0 && input.group.ageGroup.seniors === 0) {
-      results.sort((a, b) => b.rating - a.rating);
-    }
+    const preferredCuisine = input.preferredCuisine ?? [];
+    const preferenceScore = (restaurant: Restaurant): number => {
+      let score = preferredCuisine.some(cuisine => restaurant.cuisine.includes(cuisine)) ? 100 : 0;
+      if (input.group.ageGroup.seniors > 0 && (restaurant.tags.includes("老年餐") || restaurant.tags.includes("清淡"))) score += 10;
+      if (input.group.ageGroup.youngChildren > 0 && restaurant.tags.includes("儿童友好")) score += 10;
+      return score;
+    };
+    results.sort((a, b) => preferenceScore(b) - preferenceScore(a) || b.rating - a.rating);
 
     return results;
   }
@@ -87,7 +77,7 @@ export class CheckRestaurantAvailabilityTool extends BaseTool<
     input: T.CheckRestaurantAvailabilityInput,
     context?: ToolExecutionContext
   ): Promise<T.RestaurantAvailability> {
-    const rest = await getDataSource().getRestaurantById(input.restaurantId, context?.signal);
+    const rest = await getDataSource().getRestaurantById(input.restaurantId, { signal: context?.signal });
     if (!rest) throw new ToolError("E_RESOURCE_NOT_FOUND", `餐厅 ${input.restaurantId} 不存在`);
 
     // 拥挤度启发式：综合时段/热度/真实排队数预测等待

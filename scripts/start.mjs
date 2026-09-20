@@ -17,11 +17,11 @@ const webDir = join(root, "web");
 console.log("🧭 AI出行决策 Agent — 一键启动");
 console.log("================================");
 
-// 1. 检查 Node.js 版本（需要 >= 18）
+// 1. 检查 Node.js 版本（与当前构建、页面测试依赖要求一致）
 const nodeVer = process.versions.node;
-const major = parseInt(nodeVer.split(".")[0], 10);
-if (major < 18) {
-  console.error(`❌ Node.js 版本过低（需要 >= 18），当前：v${nodeVer}`);
+const [major, minor] = nodeVer.split(".").map(Number);
+if (!((major === 20 && minor >= 19) || (major === 22 && minor >= 13) || major >= 24)) {
+  console.error(`❌ 需要 Node.js 20.19+（20.x）、22.13+（22.x）或 24+，当前：v${nodeVer}`);
   process.exit(1);
 }
 console.log(`✅ Node.js v${nodeVer}`);

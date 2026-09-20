@@ -47,6 +47,7 @@ const INTENT_SCHEMA = {
         enum: ["family", "friends", "couple", "solo"],
         description: "出行场景：family=家庭, friends=朋友聚会, couple=情侣, solo=独自",
       },
+      destinationCity: { type: "string", description: "旅行目的地城市；用户未说明则为空字符串" },
       leadRole: {
         type: "string",
         enum: ["kids", "elderly", "mixed_family", "partner", "friends_group", "solo_relax"],
@@ -104,6 +105,7 @@ const INTENT_SCHEMA = {
 };
 
 interface LLMIntentResult {
+  destinationCity?: string;
   scenario: Scenario;
   leadRole: LeadRole;
   totalPeople: number;
@@ -150,6 +152,7 @@ export async function parseIntentWithLLM(
 规则：
 - 默认下午出发(startTime="14:00")，默认5小时(durationHours=5)
 - 默认距离25km，用户说"附近"/"不远"则为15km
+- 用户明确说去某个城市时写入 destinationCity；未说明目的地时留空，不要把当前位置当作目的地
 - couple 场景默认2人，solo 默认1人，其余默认3人
 - "女朋友"/"老婆"/"约会" → scenario=couple, leadRole=partner
 - "孩子"/"小孩"+"老婆" → scenario=family（不是couple）, leadRole=kids
@@ -209,6 +212,7 @@ function llmResultToConstraints(r: LLMIntentResult): StructuredConstraints {
   const end = `${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`;
 
   return {
+    ...(r.destinationCity?.trim() ? { destination: { city: r.destinationCity.trim() } } : {}),
     group: {
       scenario: r.scenario,
       totalPeople,

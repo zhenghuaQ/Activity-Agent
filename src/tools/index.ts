@@ -4,6 +4,7 @@ export { ToolError } from "./errors.js";
 export { toolRegistry } from "./registry.js";
 export { GetUserLocationTool } from "./location.js";
 export { SearchAttractionsTool, CheckAttractionAvailabilityTool } from "./attractions.js";
+export { ResolveDestinationTool } from "./destination.js";
 export { SearchRestaurantsTool, CheckRestaurantAvailabilityTool } from "./restaurants.js";
 export { SearchBreakPlacesTool } from "./breaks.js";
 export { GenerateFollowUpTool } from "./followup.js";

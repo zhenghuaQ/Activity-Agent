@@ -73,6 +73,17 @@ export class ConstraintEngine {
       });
     }
 
+    // 5. 目的地是硬约束：任何活动跨城都不能被视为成功方案。
+    if (constraints.destination?.city) {
+      const expected = constraints.destination.city;
+      for (const act of plan.activities) {
+        const actual = act.place.location.city;
+        checks.push({ passed: actual.includes(expected) || expected.includes(actual), rule: "within_destination",
+          detail: actual.includes(expected) || expected.includes(actual)
+            ? `${act.place.name} 位于目的地 ${expected}` : `${act.place.name} 位于 ${actual}，不属于目的地 ${expected}` });
+      }
+    }
+
     return {
       passed: checks.every((check) => check.passed),
       checks,

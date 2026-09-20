@@ -1,6 +1,6 @@
 # 🧭 AI出行决策 Agent
 
-**AI Activity Decision Agent** — 一句自然语言 → 一键决策出最优出行方案（景点 + 茶歇 + 餐厅）
+**AI Activity Decision Agent** — 通过可持续补充的多轮对话，决策出合适的出行方案（景点 + 茶歇 + 餐厅）
 
 > **产品定位：核心竞争力是「一键决策」**——多维评分 + 可解释 + 个性化推荐。
 > 系统**不做下单、预订、取号、支付、配送下单**等交易/履约动作；决策完成后，用户自行在对应平台预订即可。
@@ -31,7 +31,10 @@
 - **LeadRole 用户画像体系** — 6 种主导角色（带娃/陪老人/全家/情侣/朋友/独自），自动推理茶歇偏好与忌口
 - **拥堵惩罚模型** — 以绝对耗时为核心排序依据（非拥堵等级），拥堵仅用于可视化展示
 - **LLM + 降级双保险** — OpenAI function calling 做意图解析，失败自动降级为 Mock 关键词匹配
-- **Harness Engineering 评估** — 4 场景用例 + 多维度 Metrics + 自动化 Runner，4/4 通过
+- **开放地点数据 Provider** — 支持内置 Mock/高德、社区 TypeScript Provider 和语言无关 HTTP Provider
+- **真正的多轮规划** — 自由文本补充与选择题追问并存，后续输入只覆盖明确修改的条件
+- **会话级短期记忆** — 对话、约束和方案版本持久化，关闭页面后可恢复并继续补充
+- **统计化 Eval** — 完整多轮任务达标率为主指标，记忆错误与硬约束违规独立报告，时延按任务做 Bootstrap
 
 ## 项目结构
 
@@ -46,10 +49,11 @@ ai-activity-agent/
 │   └── transit.ts         # 交通模型（拥堵/路线/惩罚分）
 ├── src/
 │   ├── core/              # 配置/日志/缓存/地理工具
-│   ├── data/              # 数据层（Mock + 高德 Provider）
+│   ├── data/              # Provider Registry、Mock/高德/HTTP Provider 与合规测试工具
 │   ├── intent/            # 意图解析（Mock关键词匹配）
 │   ├── llm/               # LLM集成（OpenAI function calling）
 │   ├── profile/           # 用户画像 + 分层 + 存储
+│   ├── conversation/      # 多轮会话、短期记忆、事件投影与 JSON 存储
 │   ├── decision/          # 多维评分 + 帕累托 + 可解释
 │   ├── planner/
 │   │   ├── engine.ts      # 5阶段一键决策引擎（SSE 流式）
@@ -71,7 +75,7 @@ ai-activity-agent/
 
 ### 前置要求
 
-- Node.js >= 18
+- Node.js 20.19+（20.x）、22.13+（22.x）或 24+（包含页面测试依赖要求）
 - npm >= 9
 
 ### 安装
@@ -109,7 +113,7 @@ npm run dev:web            # 或用 concurrently 一键并行前后端
 # 方式三：CLI 交互式 Demo（终端输入自然语言，获取出行方案）
 npm run demo
 
-# 运行评估套件（4 场景用例自动验证）
+# 运行评估套件（单轮对照 + 多轮完整任务 + 统计区间）
 npm run eval
 ```
 
@@ -142,7 +146,7 @@ npm run eval
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| Node.js | >= 18 | 运行时（tsx 直接执行 TS） |
+| Node.js | 20.19+（20.x）、22.13+（22.x）或 24+ | 运行时及测试环境 |
 | npm | >= 9 | 包管理 |
 | LLM API Key | 可选 | 缺失自动降级 Mock，不阻塞运行 |
 
@@ -161,11 +165,21 @@ cp .env.example .env
 | `LLM_API_KEY` | 否 | OpenAI 兼容接口 Key；缺失则走 Mock 关键词解析 |
 | `LLM_BASE_URL` | 否 | LLM 服务地址（DeepSeek/通义/GLM 等兼容接口） |
 | `LLM_MODEL` | 否 | 模型名，如 `deepseek-chat` |
-| `AMAP_KEY` | 否 | 高德地图 Key；缺失走 Mock POI 数据 |
+| `ACTIVITY_DATA_PROVIDER` | 否 | `auto` / `mock` / `amap` / `http` / 已注册的社区 Provider ID |
+| `ACTIVITY_DATA_PROVIDER_URL` | HTTP 时必填 | 社区 HTTP Provider 的服务地址 |
+| `ACTIVITY_DATA_PROVIDER_TOKEN` | 否 | HTTP Provider 的 Bearer Token，仅由服务端读取 |
+| `AMAP_API_KEY` | 高德时必填 | 高德 Provider 的 Web API Key |
 | `PORT` | 否 | 后端端口，默认 3000 |
 | `NODE_ENV` | 否 | development / production |
 
 > **零配置可运行**：不配置任何 Key，系统用内置 Mock 数据 + 关键词意图解析完整跑通全链路。
+
+### 接入自己的地点数据
+
+Provider 首先把 `city/district` 解析成 `SearchArea`，候选生成再在该区域检索景点、
+餐厅和茶歇。目的地不受支持时会明确失败，不会拿其他城市的数据替代。项目同时
+提供本地 TypeScript 注册接口、HTTP Provider 协议、来源追踪和黑盒合规测试。
+完整契约与示例见 [`docs/data-provider-v1.md`](docs/data-provider-v1.md)。
 
 ### 生产构建
 
@@ -297,6 +311,44 @@ Session 存储设有会话数、闲置时间和消息数上限；未提供 Sessi
 HTTP 请求使用完成后释放的临时会话。取消信号从 HTTP/SSE 断开一路传播到
 LLM、Tool、数据 Provider 和通勤 I/O，取消不会被转换成 Mock/fallback。
 Eval 的 Runtime 对照组直接通过 `AgentRuntime` 运行，不经过兼容 API。
+
+Runtime 内部统一发布传输无关的 `AgentEvent v1`。事件信封包含版本、分类、
+类型、Run 内序号和 run/session/trace 关联信息。`AgentEventBus` 只按注册顺序
+把事件扇出给匹配的 Subscriber，并隔离单个 Subscriber 的异常；SSE 映射、
+旧阶段回调等具体事务分别由对应 Subscriber 处理，EventBus 不依赖任何传输协议。
+Run 状态只能通过生命周期状态机迁移，每次创建、状态变化和取消请求都会发布
+事件；结构化日志也由应用层 Logging Subscriber 生成，Runtime/Planner 不直接
+依赖日志实现。`AgentRun` 聚合拥有状态和事件发布能力，EventBus 通过
+`AgentRuntimeOptions` 注入；每种事件的 payload 都按 `type` 提供独立 TypeScript
+契约。
+详细契约见 [`docs/agent-event-v1.md`](docs/agent-event-v1.md)。
+
+会话短期记忆同样通过独立 `ConversationMemorySubscriber` 消费 Runtime 事件：
+意图解析完成后立即保存约束，方案完成后保存不可变版本，用户可确认任一帕累托
+候选。前端把当前 conversation ID 保存在浏览器本地，并通过
+`GET /api/conversations/:id` 恢复对话。默认存储文件为
+`data/conversations.json`；它只保存当前会话事实，不做跨会话长期画像推断。
+
+## 测试追问交互
+
+运行 `npm run dev:web`（若已有旧服务，请先重启），打开开发页面，输入
+“带5岁娃和减肥老婆出去玩4-6小时”，点击“一键决策”。出现追问后，为每题选择答案，
+点击“提交回答，继续规划”：系统会更新约束并继续同一次运行，不重新解析输入。
+预算用于评分偏好；减脂选项影响餐厅筛选；已说明的忌口始终保留。
+
+追问期间可中止；默认任务总截止时间为 120 秒，包含排队、执行和等待回答。
+当前支持旅行风格、预算、饮食和减脂等单选问题，也允许用户在任意方案后继续
+输入自然语言补充或纠正。刷新/关闭页面会中止正在等待的 Runtime 运行，但已解析
+约束会保存在当前会话；重新打开后可直接继续补充，无需重述此前条件。
+网页会自动启用 `interactive=1`；旧同步 API 和未启用交互的 SSE 保持原行为。
+接口及取消/重试语义见 `docs/agent-event-v1.md` 的“追问闭环”。
+
+## 多轮 Eval 口径
+
+- 主指标：完整多轮任务是否成功产出可选择方案，使用任务级 Wilson 95% 区间。
+- 独立约束指标：发生记忆错误的任务比例、发生硬约束违规的任务比例；同时展示原始检查数。
+- 辅助指标：候选方案对显式偏好的覆盖率、总时延和 Tool 调用数；时延使用任务级 Bootstrap，版本对比采用同任务配对差值。
+- 同一会话中的 turn/check 不视作独立样本，避免人为放大样本量。当前内置用例属于开发集；上线门禁前仍需扩充并冻结代表性 holdout。
 
 ## 设计理念
 
