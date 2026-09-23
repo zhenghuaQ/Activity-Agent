@@ -13,6 +13,7 @@ import { replayAgentEvents } from "../src/runtime/event-reducer.js";
 import { SearchRestaurantsTool } from "../src/tools/restaurants.js";
 import { GenerateFollowUpTool } from "../src/tools/followup.js";
 import { generateFollowUpWithLLM } from "../src/llm/followup.js";
+import { HOME } from "../src/data/mock.js";
 
 vi.mock("../src/llm/followup.js", () => ({ generateFollowUpWithLLM: vi.fn(async () => []) }));
 
@@ -143,7 +144,7 @@ describe("追问交互闭环", () => {
     const patches = interpretFollowUpAnswers(constraints, [q], [{ questionId: q.id, selectedValues: ["strict"] }]);
     const state = await stage2_followUp({ stage: "follow_up_questions", constraints, errors: [] }, patches);
     const tool = new SearchRestaurantsTool();
-    const input = { group: state.constraints!.group, distance: constraints.distance, timeWindow: constraints.timeWindow };
+    const input = { group: state.constraints!.group, distance: constraints.distance, origin: HOME, timeWindow: constraints.timeWindow };
     const normal = await tool.run(input);
     const strict = await tool.run({ ...input, dietaryRestrictions: state.constraints!.group.preferences.dietaryRestrictions });
     expect(strict.length).toBeGreaterThan(0);

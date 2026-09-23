@@ -76,11 +76,11 @@ export function applyProfileToConstraints(
 
   // 距离：显式自定义优先；否则用分层默认作为「上限」收紧（只缩不放，
   // 避免把亲子/陪老等人群拖得过远），无默认则保持请求值。
-  const maxKm =
-    ov.maxDistanceKm ??
-    (seg.defaults?.maxDistanceKm
-      ? Math.min(constraints.distance.maxKm, seg.defaults.maxDistanceKm)
-      : constraints.distance.maxKm);
+  const requestDistance = constraints.distance.preferredMaxKm ?? constraints.distance.hardMaxKm;
+  const preferredMaxKm = ov.maxDistanceKm
+    ?? (seg.defaults?.maxDistanceKm !== undefined && requestDistance !== undefined
+      ? Math.min(requestDistance, seg.defaults.maxDistanceKm)
+      : seg.defaults?.maxDistanceKm ?? constraints.distance.preferredMaxKm);
 
   const dietary = Array.from(
     new Set([
@@ -102,7 +102,7 @@ export function applyProfileToConstraints(
         preferredCuisine: cuisine,
       },
     },
-    distance: { ...constraints.distance, maxKm },
+    distance: { ...constraints.distance, preferredMaxKm },
   };
 }
 

@@ -24,13 +24,7 @@ const constraints = {
   },
   timeWindow: { start: "14:00", end: "18:00", durationHours: 4 },
   distance: {
-    maxKm: 10,
-    homeLocation: {
-      lat: 0,
-      lng: 0,
-      address: "起点",
-      city: "测试城",
-    },
+    hardMaxKm: 10,
   },
   extraHints: [],
 } satisfies StructuredConstraints;

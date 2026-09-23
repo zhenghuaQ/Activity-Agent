@@ -125,7 +125,11 @@ ai-activity-agent/
 │   └── demo.ts               # CLI 交互式 Demo
 ├── web/                      # 前端看板（Vite + React + TypeScript + Recharts）
 │   └── src/pages/            # 决策页 / 监控面板 / 画像管理
-├── eval/                     # Harness Engineering（4 场景用例 + 评估 Runner）
+├── eval/                     # Decision Eval V3 + Runtime Regression
+│   ├── decision/             # 主评测：多轮决策、Memory 与未来决策质量指标
+│   ├── runtime/              # 工程辅助：旧 5-stage baseline 对照
+│   ├── shared/               # 统计工具
+│   └── runner.ts             # 兼容入口：先 Decision，再 Runtime
 ├── test/                     # 单元测试
 ├── scripts/start.mjs         # 一键启动脚本
 ├── README.md

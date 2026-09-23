@@ -27,8 +27,7 @@ const constraints = {
   },
   timeWindow: { start: "14:00", end: "18:00", durationHours: 4 },
   distance: {
-    maxKm: 10,
-    homeLocation: { lat: 0, lng: 0, address: "起点", city: "测试城" },
+    hardMaxKm: 10,
   },
   extraHints: [],
 } satisfies StructuredConstraints;
@@ -66,7 +65,7 @@ describe("Runtime Evaluation / Replan", () => {
     expect(result.evaluation).toBeDefined();
   });
 
-  it("turns an over-distance failure into a bounded replan decision", () => {
+  it("stops replan at the hard distance cap", () => {
     const state = createAgentState({ rawText: "test" });
     state.planning = {
       stage: "fine_scheduling",
@@ -77,11 +76,8 @@ describe("Runtime Evaluation / Replan", () => {
     };
     const evaluation = constraintEngine.evaluatePlan(plan(20), constraints);
     const decision = decideReplan(state, evaluation.checks.filter((x) => !x.passed));
-    expect(decision.shouldReplan).toBe(true);
-    expect(decision.patch?.searchRadiusKm).toBeGreaterThan(10);
-    expect(decision.nextPlan?.steps.map((x) => x.type)).toEqual([
-      "candidate_generation", "feasibility_check", "fine_scheduling",
-    ]);
+    expect(decision.shouldReplan).toBe(false);
+    expect(decision.reason).toBe("SEARCH_RADIUS_HARD_CAP_REACHED");
   });
 
   it("changes search policy without changing the user distance constraint", () => {
@@ -89,8 +85,9 @@ describe("Runtime Evaluation / Replan", () => {
     state.planning = {
       stage: "fine_scheduling",
       constraints,
-      searchPolicy: { radiusKm: 10 },
+      searchPolicy: { radiusKm: 5, maxRadiusKm: 30 },
       planRevision: 0,
+      termination: { reason: "plan_selected", code: "PLAN_SELECTED" },
       selectedPlan: plan(20),
       decision: { recommended: {} } as never,
       candidates: [{ plan: plan(20), score: 1 } as never],
@@ -102,12 +99,13 @@ describe("Runtime Evaluation / Replan", () => {
     ]);
     const next = applyReplanPatch(state, decision.patch);
 
-    expect(next.planning.constraints?.distance.maxKm).toBe(10);
-    expect(next.planning.searchPolicy?.radiusKm).toBeGreaterThan(10);
+    expect(next.planning.constraints?.distance.hardMaxKm).toBe(10);
+    expect(next.planning.searchPolicy?.radiusKm).toBeGreaterThan(5);
     expect(next.planning.selectedPlan).toBeUndefined();
     expect(next.planning.decision).toBeUndefined();
     expect(next.planning.candidates).toBeUndefined();
     expect(next.planning.planRevision).toBe(1);
+    expect(next.planning.termination).toBeUndefined();
   });
 
   it("cannot accept the stale plan when a replan produces no replacement", () => {

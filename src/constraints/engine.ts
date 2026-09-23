@@ -60,17 +60,18 @@ export class ConstraintEngine {
       checks.push(checkTransitFeasible(act.transitTo, available));
     }
 
-    // 4. 出发点距离：这里只记录事实，不改变当前 Stage 4 的过滤行为。
-    for (const act of plan.activities) {
-      const maxKm = constraints.distance.maxKm;
-      checks.push({
-        passed: act.place.distanceKm <= maxKm,
-        rule: "within_distance",
-        detail:
-          act.place.distanceKm <= maxKm
+    // 4. 出发点距离：只有用户明确给出的 hardMaxKm 才构成硬约束。
+    if (constraints.distance.hardMaxKm !== undefined) {
+      for (const act of plan.activities) {
+        const maxKm = constraints.distance.hardMaxKm;
+        checks.push({
+          passed: act.place.distanceKm <= maxKm,
+          rule: "within_distance",
+          detail: act.place.distanceKm <= maxKm
             ? `${act.place.name} ${act.place.distanceKm}km ≤ ${maxKm}km`
             : `${act.place.name} ${act.place.distanceKm}km > ${maxKm}km`,
-      });
+        });
+      }
     }
 
     // 5. 目的地是硬约束：任何活动跨城都不能被视为成功方案。

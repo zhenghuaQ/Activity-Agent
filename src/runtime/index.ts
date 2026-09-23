@@ -11,6 +11,7 @@ export {
 export type {
   RuntimePlan,
   RuntimePlanStep,
+  RuntimeSystemStep,
   RuntimeStepType,
   ValidateRuntimePlanResult,
 } from "./plan.js";
@@ -85,9 +86,11 @@ export type { AgentRuntimeOptions } from "./router.js";
 export {
   createAgentInput,
   createSubmission,
+  toAgentRunInput,
 } from "./submission.js";
 export type {
   AgentInput,
+  AgentInputOptions,
   Submission,
   SubmissionId,
   InputId,

@@ -142,9 +142,10 @@ export interface TimeWindow {
 
 /** 距离约束 */
 export interface DistanceConstraint {
-  maxKm: number;          // 最大距离（默认15km）
-  /** 用户真实定位（通过定位API获取） */
-  homeLocation: GeoLocation;
+  /** 用户明确表达的不可突破距离上限。 */
+  hardMaxKm?: number;
+  /** 用户偏好距离，可在候选不足时放宽。 */
+  preferredMaxKm?: number;
 }
 
 /** 地理位置 */
@@ -157,7 +158,10 @@ export interface GeoLocation {
   district?: string;
 }
 
-/** 结构化约束（从自然语言提取 + 询问修正） */
+/**
+ * 结构化约束（从自然语言提取 + 询问修正）。
+ * Invariant: StructuredConstraints 只描述用户需求，不承载当前环境事实。
+ */
 export interface StructuredConstraints {
   /** 旅行目的地；未提供时沿用出发位置所在城市。 */
   destination?: { city: string; district?: string };
@@ -327,13 +331,31 @@ export type PlanningStage =
   | "feasibility_check"
   | "fine_scheduling";
 
+/** Stable business conclusion produced only after planning and replanning finish. */
+export type PlanningTerminationReason = "plan_selected" | "no_feasible_plan";
+
+/** Machine-readable detail for a normal planning conclusion. */
+export type PlanningTerminationCode =
+  | "PLAN_SELECTED"
+  | "NO_CANDIDATES"
+  | "NO_SELECTABLE_PLAN";
+
+export interface PlanningTermination {
+  reason: PlanningTerminationReason;
+  code: PlanningTerminationCode;
+}
+
 /** 规划过程中的中间状态 */
 export interface PlanningState {
   stage: PlanningStage;
+  /** Written once by ActivityPlanner after the final replan opportunity. Absent on runtime failure. */
+  termination?: PlanningTermination;
   constraints?: StructuredConstraints;
   /** Runtime may expand discovery without changing the user's acceptance constraint. */
   searchPolicy?: {
     radiusKm: number;
+    /** Runtime safety ceiling; independent from user constraints. */
+    maxRadiusKm?: number;
   };
   /** 目的地经 Provider 解析后的实际检索区域。 */
   resolvedSearchArea?: import("./datasource.js").SearchArea;

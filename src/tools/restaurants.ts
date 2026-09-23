@@ -6,6 +6,7 @@
 // ============================================================
 
 import type { Restaurant } from "../../spec/types.js";
+import type { ActivityDataProviderV1 } from "../../spec/datasource.js";
 import type * as T from "../../spec/tools.js";
 import {
   SEARCH_RESTAURANTS_TOOL,
@@ -13,27 +14,34 @@ import {
 } from "../../spec/tools.js";
 import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
-import { getDataSource } from "../data/index.js";
+import { createDefaultDataProvider } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
 import { rethrowProviderError } from "./provider-errors.js";
+import { DEFAULT_SEARCH_RADIUS_KM } from "../planner/search-policy.js";
 
-// ─── Tool 2: search_restaurants ────────────────────────
+// ─── Tool 2: search_restaurants (deprecated compatibility wrapper) ────────
 
 export class SearchRestaurantsTool extends BaseTool<
   T.SearchRestaurantsInput,
   T.SearchRestaurantsOutput
 > {
+  constructor(private readonly provider: ActivityDataProviderV1 = createDefaultDataProvider()) {
+    super();
+  }
+
   name = "search_restaurants";
   description = SEARCH_RESTAURANTS_TOOL.description;
   inputSchema = SEARCH_RESTAURANTS_TOOL.inputSchema;
 
   async run(input: T.SearchRestaurantsInput, context?: ToolExecutionContext): Promise<Restaurant[]> {
-    const ds = getDataSource();
     let results: Restaurant[];
-    try { results = await ds.searchRestaurants({
-      origin: input.distance.homeLocation, destination: input.destination, searchArea: input.searchArea,
-      radiusKm: input.distance.maxKm, localFeatures: input.localFeatures,
-    }, { signal: context?.signal }); } catch (error) { rethrowProviderError(error); }
+    try {
+      const result = await this.provider.searchPlaces({
+        spatial: { origin: input.origin, maxKm: input.distance.hardMaxKm ?? input.distance.preferredMaxKm ?? DEFAULT_SEARCH_RADIUS_KM },
+        intent: { categories: ["restaurant"], preferredTags: input.preferenceTags },
+      }, { signal: context?.signal });
+      results = result.places.map((candidate) => candidate.detail).filter((place): place is Restaurant => place.type === "restaurant");
+    } catch (error) { rethrowProviderError(error); }
 
     // 忌口匹配
     const restrictions = input.dietaryRestrictions ?? [];
@@ -69,6 +77,10 @@ export class CheckRestaurantAvailabilityTool extends BaseTool<
   T.CheckRestaurantAvailabilityInput,
   T.CheckRestaurantAvailabilityOutput
 > {
+  constructor(private readonly provider: ActivityDataProviderV1 = createDefaultDataProvider()) {
+    super();
+  }
+
   name = "check_restaurant_availability";
   description = CHECK_RESTAURANT_AVAILABILITY_TOOL.description;
   inputSchema = CHECK_RESTAURANT_AVAILABILITY_TOOL.inputSchema;
@@ -77,7 +89,7 @@ export class CheckRestaurantAvailabilityTool extends BaseTool<
     input: T.CheckRestaurantAvailabilityInput,
     context?: ToolExecutionContext
   ): Promise<T.RestaurantAvailability> {
-    const rest = await getDataSource().getRestaurantById(input.restaurantId, { signal: context?.signal });
+    const rest = await this.provider.getRestaurantById(input.restaurantId, { signal: context?.signal });
     if (!rest) throw new ToolError("E_RESOURCE_NOT_FOUND", `餐厅 ${input.restaurantId} 不存在`);
 
     // 拥挤度启发式：综合时段/热度/真实排队数预测等待

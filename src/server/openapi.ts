@@ -150,6 +150,19 @@ export function getOpenApiSpec(version: string) {
             sessionId: { type: "string", description: "可恢复会话 ID；复用后继承当前会话短期记忆" },
             autoSegment: { type: "boolean", description: "无画像时自动分层" },
             weather: { type: "string", enum: ["clear", "rain", "snow", "hot", "cold", "unknown"] },
+            context: {
+              type: "object",
+              description: "调用方提供的环境事实提示，不是已解析的位置状态",
+              properties: {
+                location: {
+                  oneOf: [
+                    { type: "object", required: ["kind", "lat", "lng"], properties: { kind: { const: "coords" }, lat: { type: "number" }, lng: { type: "number" }, address: { type: "string" }, city: { type: "string" } } },
+                    { type: "object", required: ["kind", "address"], properties: { kind: { const: "address" }, address: { type: "string" }, city: { type: "string" } } },
+                    { type: "object", required: ["kind"], properties: { kind: { enum: ["ip", "default"] }, ip: { type: "string" } } },
+                  ],
+                },
+              },
+            },
           },
         },
         ProfileRequest: {

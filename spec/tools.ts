@@ -18,6 +18,8 @@ import type {
   TimeWindow,
 } from "./types.js";
 import type { DestinationQuery, SearchArea } from "./datasource.js";
+import type { ResolvedLocation } from "./location.js";
+import type { PlaceSearchRequest, PlaceSearchResult } from "./place-search.js";
 
 // ─── Tool: resolve_destination ─────────────────────────
 
@@ -28,11 +30,23 @@ export type ResolveDestinationOutput = SearchArea;
 // 🆕 获取用户真实定位（Mock → 真实API）
 
 export interface GetUserLocationInput {
-  /** 用户ID或设备标识（Demo可忽略） */
+  /** 定位请求类型；缺省时由 Tool 根据其余字段推断或使用 default。 */
+  kind?: "coords" | "address" | "ip" | "default";
+  lat?: number;
+  lng?: number;
+  address?: string;
+  city?: string;
+  ip?: string;
+  /** @deprecated 当前定位服务不依赖 userId，仅为旧调用保留。 */
   userId?: string;
 }
 
-export type GetUserLocationOutput = GeoLocation;
+export type GetUserLocationOutput = ResolvedLocation;
+
+// ─── Generic Tool: search_places ────────────────────────
+
+export type SearchPlacesInput = PlaceSearchRequest;
+export type SearchPlacesOutput = PlaceSearchResult;
 
 // ─── Tool 1: search_attractions ─────────────────────────
 // 🔄 增加 localFeatures 参数
@@ -41,6 +55,8 @@ export interface SearchAttractionsInput {
   crowdTags: CrowdTag[];
   timeWindow: TimeWindow;
   distance: DistanceConstraint;
+  /** Runtime 已解析的实际搜索起点。 */
+  origin: GeoLocation;
   destination?: DestinationQuery;
   searchArea?: SearchArea;
   keywords?: string[];
@@ -57,6 +73,8 @@ export interface SearchRestaurantsInput {
   group: Group;
   timeWindow: TimeWindow;
   distance: DistanceConstraint;
+  /** Runtime 已解析的实际搜索起点。 */
+  origin: GeoLocation;
   destination?: DestinationQuery;
   searchArea?: SearchArea;
   preferenceTags?: string[];
@@ -81,6 +99,8 @@ export interface SearchBreakPlacesInput {
   /** 是否有幼年儿童 */
   hasYoungChildren: boolean;
   distance: DistanceConstraint;
+  /** Runtime 已解析的实际搜索起点。 */
+  origin: GeoLocation;
   destination?: DestinationQuery;
   searchArea?: SearchArea;
   /** 期望的时间段 */
@@ -223,23 +243,63 @@ const timeWindowSchema: JsonSchemaObject = {
 
 const distanceSchema: JsonSchemaObject = {
   type: "object",
-  description: "距离约束（出发点 + 最大搜索半径）",
+  description: "用户距离约束；运行时搜索半径由 SearchPolicy 决定",
   properties: {
-    maxKm: { type: "number", description: "最大搜索半径（公里），候选不足时可扩大" },
-    homeLocation: {
+    hardMaxKm: { type: "number", description: "不可突破的距离上限（公里）" },
+    preferredMaxKm: { type: "number", description: "偏好距离（公里），候选不足时可放宽" },
+  },
+  required: [],
+};
+
+const originSchema: JsonSchemaObject = {
+  type: "object",
+  description: "Runtime 已解析的实际搜索起点",
+  properties: {
+    lat: { type: "number" },
+    lng: { type: "number" },
+    address: { type: "string" },
+    city: { type: "string" },
+    district: { type: "string" },
+  },
+  required: ["lat", "lng", "address", "city"],
+};
+
+const placeSearchIntentSchema: JsonSchemaObject = {
+  type: "object",
+  description: "开放式地点搜索意图；categories 不绑定固定枚举",
+  properties: {
+    query: { type: "string", description: "关键词或简短自然语言描述（可选）" },
+    categories: { type: "array", items: { type: "string" }, description: "地点类别（可多选）" },
+    requiredTags: { type: "array", items: { type: "string" }, description: "必须满足的标签" },
+    preferredTags: { type: "array", items: { type: "string" }, description: "优先匹配的标签" },
+    excludedTags: { type: "array", items: { type: "string" }, description: "排除的标签" },
+    filters: {
       type: "object",
-      description: "出发点经纬度",
       properties: {
-        lat: { type: "number" },
-        lng: { type: "number" },
-        address: { type: "string" },
-        city: { type: "string" },
-        district: { type: "string" },
+        minRating: { type: "number", minimum: 0, maximum: 5 },
+        priceLevels: { type: "array", items: { type: "integer" } },
+        cuisines: { type: "array", items: { type: "string" } },
+        openAt: { type: "string" },
       },
-      required: ["lat", "lng"],
     },
   },
-  required: ["maxKm", "homeLocation"],
+};
+
+const placeSearchRequestSchema: JsonSchemaObject = {
+  type: "object",
+  properties: {
+    spatial: {
+      type: "object",
+      properties: {
+        origin: originSchema,
+        maxKm: { type: "number", description: "搜索半径（km）" },
+      },
+      required: ["origin", "maxKm"],
+    },
+    intent: placeSearchIntentSchema,
+    limit: { type: "integer", minimum: 1 },
+  },
+  required: ["spatial", "intent"],
 };
 
 const destinationSchema: JsonSchemaObject = {
@@ -321,15 +381,27 @@ export const RESOLVE_DESTINATION_TOOL: LLMToolDefinition = {
   inputSchema: { type: "object", properties: { destination: destinationSchema }, required: ["destination"] },
 };
 
+export const SEARCH_PLACES_TOOL: LLMToolDefinition = {
+  description:
+    "通用地点搜索。按空间范围与开放式类别/意图查找地点；categories 可同时包含多个 canonical category，不绑定 Activity Plan role。",
+  inputSchema: placeSearchRequestSchema,
+};
+
 // ─── Tool 的 LLM 接口定义 ───────────────────────────────
 
 export const GET_USER_LOCATION_TOOL: LLMToolDefinition = {
   description:
-    "获取用户当前出发位置（经纬度+地址）。规划开始时先调用，后续搜索以返回的坐标为中心。",
+    "Resolve the user's current location from runtime-provided coordinates, address, IP hint, or the configured default fallback.",
   inputSchema: {
     type: "object",
     properties: {
-      userId: { type: "string", description: "用户ID（可选，Demo 可忽略）" },
+      kind: { type: "string", enum: ["coords", "address", "ip", "default"] },
+      lat: { type: "number", description: "坐标纬度，范围 [-90, 90]" },
+      lng: { type: "number", description: "坐标经度，范围 [-180, 180]" },
+      address: { type: "string", description: "待地理编码的地址" },
+      city: { type: "string", description: "坐标的城市提示（可选）" },
+      ip: { type: "string", description: "IP 定位提示（可选）" },
+      userId: { type: "string", description: "旧版用户标识（已弃用，仅兼容）" },
     },
   },
 };
@@ -347,6 +419,7 @@ export const SEARCH_ATTRACTIONS_TOOL: LLMToolDefinition = {
       },
       timeWindow: timeWindowSchema,
       distance: distanceSchema,
+      origin: originSchema,
       destination: destinationSchema,
       searchArea: searchAreaSchema,
       keywords: { type: "array", items: { type: "string" }, description: "关键词（可选）" },
@@ -356,7 +429,7 @@ export const SEARCH_ATTRACTIONS_TOOL: LLMToolDefinition = {
         items: { type: "string", enum: [...LOCAL_FEATURE_ENUM] },
       },
     },
-    required: ["crowdTags", "timeWindow", "distance"],
+    required: ["crowdTags", "timeWindow", "distance", "origin"],
   },
 };
 
@@ -369,6 +442,7 @@ export const SEARCH_RESTAURANTS_TOOL: LLMToolDefinition = {
       group: groupSchema,
       timeWindow: timeWindowSchema,
       distance: distanceSchema,
+      origin: originSchema,
       destination: destinationSchema,
       searchArea: searchAreaSchema,
       preferenceTags: {
@@ -391,7 +465,7 @@ export const SEARCH_RESTAURANTS_TOOL: LLMToolDefinition = {
         items: { type: "string", enum: [...LOCAL_FEATURE_ENUM] },
       },
     },
-    required: ["group", "timeWindow", "distance"],
+    required: ["group", "timeWindow", "distance", "origin"],
   },
 };
 
@@ -409,11 +483,12 @@ export const SEARCH_BREAK_PLACES_TOOL: LLMToolDefinition = {
       hasElderly: { type: "boolean", description: "是否有老人（过滤无障碍设施）" },
       hasYoungChildren: { type: "boolean", description: "是否有幼童（过滤儿童友好）" },
       distance: distanceSchema,
+      origin: originSchema,
       destination: destinationSchema,
       searchArea: searchAreaSchema,
       afterTime: { type: "string", description: "期望到达时间 HH:MM" },
     },
-    required: ["breakSubtype", "hasElderly", "hasYoungChildren", "distance", "afterTime"],
+    required: ["breakSubtype", "hasElderly", "hasYoungChildren", "distance", "origin", "afterTime"],
   },
 };
 
@@ -490,6 +565,7 @@ export const ESTIMATE_TRANSIT_TOOL: LLMToolDefinition = {
 export const TOOL_DEFS: Record<string, LLMToolDefinition> = {
   resolve_destination: RESOLVE_DESTINATION_TOOL,
   get_user_location: GET_USER_LOCATION_TOOL,
+  search_places: SEARCH_PLACES_TOOL,
   search_attractions: SEARCH_ATTRACTIONS_TOOL,
   search_restaurants: SEARCH_RESTAURANTS_TOOL,
   search_break_places: SEARCH_BREAK_PLACES_TOOL,

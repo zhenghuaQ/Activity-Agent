@@ -6,6 +6,7 @@
 // ============================================================
 
 import type { Attraction } from "../../spec/types.js";
+import type { ActivityDataProviderV1 } from "../../spec/datasource.js";
 import type * as T from "../../spec/tools.js";
 import {
   SEARCH_ATTRACTIONS_TOOL,
@@ -13,27 +14,34 @@ import {
 } from "../../spec/tools.js";
 import { BaseTool, type ToolExecutionContext } from "./base.js";
 import { ToolError } from "./errors.js";
-import { getDataSource } from "../data/index.js";
+import { createDefaultDataProvider } from "../data/index.js";
 import { predictCrowd } from "../data/crowd.js";
 import { rethrowProviderError } from "./provider-errors.js";
+import { DEFAULT_SEARCH_RADIUS_KM } from "../planner/search-policy.js";
 
-// ─── Tool 1: search_attractions ────────────────────────
+// ─── Tool 1: search_attractions (deprecated compatibility wrapper) ────────
 
 export class SearchAttractionsTool extends BaseTool<
   T.SearchAttractionsInput,
   T.SearchAttractionsOutput
 > {
+  constructor(private readonly provider: ActivityDataProviderV1 = createDefaultDataProvider()) {
+    super();
+  }
+
   name = "search_attractions";
   description = SEARCH_ATTRACTIONS_TOOL.description;
   inputSchema = SEARCH_ATTRACTIONS_TOOL.inputSchema;
 
   async run(input: T.SearchAttractionsInput, context?: ToolExecutionContext): Promise<Attraction[]> {
-    const ds = getDataSource();
     let results: Attraction[];
-    try { results = await ds.searchAttractions({
-      origin: input.distance.homeLocation, destination: input.destination, searchArea: input.searchArea,
-      radiusKm: input.distance.maxKm, keywords: input.keywords, localFeatures: input.localFeatures,
-    }, { signal: context?.signal }); } catch (error) { rethrowProviderError(error); }
+    try {
+      const result = await this.provider.searchPlaces({
+        spatial: { origin: input.origin, maxKm: input.distance.hardMaxKm ?? input.distance.preferredMaxKm ?? DEFAULT_SEARCH_RADIUS_KM },
+        intent: { categories: ["attraction"], query: input.keywords?.[0], preferredTags: input.localFeatures },
+      }, { signal: context?.signal });
+      results = result.places.map((candidate) => candidate.detail).filter((place): place is Attraction => place.type === "attraction");
+    } catch (error) { rethrowProviderError(error); }
 
     // 人群标签匹配（业务过滤）
     if (input.crowdTags.length > 0) {
@@ -55,12 +63,16 @@ export class CheckAttractionAvailabilityTool extends BaseTool<
   T.CheckAttractionAvailabilityInput,
   T.CheckAttractionAvailabilityOutput
 > {
+  constructor(private readonly provider: ActivityDataProviderV1 = createDefaultDataProvider()) {
+    super();
+  }
+
   name = "check_attraction_availability";
   description = CHECK_ATTRACTION_AVAILABILITY_TOOL.description;
   inputSchema = CHECK_ATTRACTION_AVAILABILITY_TOOL.inputSchema;
 
   async run(input: T.CheckAttractionAvailabilityInput, context?: ToolExecutionContext): Promise<T.AttractionAvailability> {
-    const attr = await getDataSource().getAttractionById(input.attractionId, { signal: context?.signal });
+    const attr = await this.provider.getAttractionById(input.attractionId, { signal: context?.signal });
     if (!attr) {
       throw new ToolError("E_RESOURCE_NOT_FOUND", `景点 ${input.attractionId} 不存在`);
     }

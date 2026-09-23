@@ -1,5 +1,6 @@
 ﻿// spec/index.ts — 统一导出
 export * from "./types.js";
+export * from "./location.js";
 export * from "./agent.js";
 export * from "./agent-event.js";
 export * from "./agent-event-compat.js";
@@ -11,3 +12,4 @@ export * from "./transit.js";
 export * from "./errors.js";
 export * from "./tool-response.js";
 export * from "./datasource.js";
+export * from "./place-search.js";

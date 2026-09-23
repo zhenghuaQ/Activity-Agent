@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bootstrapMean, pairedBootstrapDifference, wilsonInterval } from "../eval/statistics.js";
+import { bootstrapMean, pairedBootstrapDifference, wilsonInterval } from "../eval/shared/statistics.js";
 
 describe("evaluation statistics", () => {
   it("uses a bounded Wilson interval for small binomial samples", () => {

@@ -16,7 +16,6 @@ import { ALL_DIMENSIONS } from "../../spec/decision.js";
 import { normalizeWeights } from "./weights.js";
 import { timeToMinutes } from "../../spec/constraints.js";
 import { predictCrowd } from "../data/crowd.js";
-import { getDataSource } from "../data/index.js";
 import type { CrowdPrediction } from "../../spec/datasource.js";
 import {
   TIME_IDEAL_RATIO,
@@ -198,7 +197,11 @@ export function scorePlan(input: ScoringInput): PlanScore {
   // 置信度：数据源 + 拥挤度置信度 + 行程完整度
   const avgCrowdConf =
     crowds.length > 0 ? crowds.reduce((s, c) => s + c.confidence, 0) / crowds.length : 0.5;
-  const usingAmap = getDataSource().name.includes("amap");
+  // 置信度应反映候选本身的实际数据来源，而不是读取进程级 Provider。
+  // 没有来源标记的旧候选按 Mock 兼容路径处理。
+  const usingAmap = input.plan.activities.some((activity) =>
+    activity.place.source?.providerId.toLowerCase().includes("amap") === true,
+  );
   const complete = input.plan.activities.every((a) => a.transitTo !== undefined);
   const confidence = Math.max(
     0,

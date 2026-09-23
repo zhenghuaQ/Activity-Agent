@@ -8,9 +8,15 @@ import { GetUserLocationTool } from "./location.js";
 import { SearchAttractionsTool, CheckAttractionAvailabilityTool } from "./attractions.js";
 import { SearchRestaurantsTool, CheckRestaurantAvailabilityTool } from "./restaurants.js";
 import { SearchBreakPlacesTool } from "./breaks.js";
+import { SearchPlacesTool } from "./places.js";
 import { GenerateFollowUpTool } from "./followup.js";
 import { EstimateTransitTool } from "./transit.js";
 import { ResolveDestinationTool } from "./destination.js";
+import type { LocationResolver } from "../../spec/location.js";
+import type { ActivityDataProviderV1 } from "../../spec/datasource.js";
+import { createDefaultDataProvider } from "../data/index.js";
+import { ActivityDataGeocodingProvider } from "../location/providers.js";
+import { createDefaultLocationResolver } from "../location/service.js";
 
 /** 宽松的 Tool 接口 — 用于注册表统一管理 */
 interface AnyTool {
@@ -21,18 +27,31 @@ interface AnyTool {
 }
 
 /** Tool注册表 */
-class ToolRegistry {
+export interface ToolRegistryDependencies {
+  locationResolver?: LocationResolver;
+  dataProvider?: ActivityDataProviderV1;
+}
+
+/** @deprecated Use ToolRegistryDependencies. Kept for callers of the previous API. */
+export type ToolRegistryOptions = ToolRegistryDependencies;
+
+export class ToolRegistry {
   private tools = new Map<string, AnyTool>();
 
-  constructor() {
+  constructor(dependencies: ToolRegistryDependencies = {}) {
+    const dataProvider = dependencies.dataProvider ?? createDefaultDataProvider();
+    const locationResolver = dependencies.locationResolver ?? createDefaultLocationResolver({
+      geocodingProvider: new ActivityDataGeocodingProvider(dataProvider),
+    });
     const list: AnyTool[] = [
-      new ResolveDestinationTool(),
-      new GetUserLocationTool(),
-      new SearchAttractionsTool(),
-      new SearchRestaurantsTool(),
-      new SearchBreakPlacesTool(),
-      new CheckAttractionAvailabilityTool(),
-      new CheckRestaurantAvailabilityTool(),
+      new ResolveDestinationTool(dataProvider),
+      new GetUserLocationTool(locationResolver),
+      new SearchPlacesTool(dataProvider),
+      new SearchAttractionsTool(dataProvider),
+      new SearchRestaurantsTool(dataProvider),
+      new SearchBreakPlacesTool(dataProvider),
+      new CheckAttractionAvailabilityTool(dataProvider),
+      new CheckRestaurantAvailabilityTool(dataProvider),
       new GenerateFollowUpTool(),
       new EstimateTransitTool(),
     ];
@@ -55,5 +74,9 @@ class ToolRegistry {
   }
 }
 
-/** 全局单例 */
-export const toolRegistry = new ToolRegistry();
+export function createToolRegistry(dependencies: ToolRegistryDependencies = {}): ToolRegistry {
+  return new ToolRegistry(dependencies);
+}
+
+/** Backward-compatible default registry; custom runs should use createToolRegistry. */
+export const toolRegistry = createToolRegistry();

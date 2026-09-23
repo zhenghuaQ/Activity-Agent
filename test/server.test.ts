@@ -102,6 +102,19 @@ describe("conversation recovery API", () => {
     expect(confirmed.json().memory.acceptedPlanVersion).toBe(1);
     expect(confirmed.json().plans[0].selectedPlan.id).toBe(planId);
   });
+
+  it("接受 context.location.coords 并在 API 边界拒绝非法位置", async () => {
+    const valid = await app.inject({ method: "POST", url: "/api/decide", payload: {
+      text: "周末逛展",
+      context: { location: { kind: "coords", lat: 39.9, lng: 116.4 } },
+    } });
+    expect(valid.statusCode).toBe(200);
+    const invalid = await app.inject({ method: "POST", url: "/api/decide", payload: {
+      text: "周末逛展",
+      context: { location: { kind: "coords", lat: "39.9", lng: 116.4 } },
+    } });
+    expect(invalid.statusCode).toBe(400);
+  });
 });
 
 describe("画像 CRUD", () => {

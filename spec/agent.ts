@@ -11,6 +11,7 @@
 // ============================================================
 
 import type { FollowUpAnswer, FollowUpQuestion, PlanningState } from "./types.js";
+import type { LocationRequest, ResolvedLocation } from "./location.js";
 import type { RuntimePlan } from "../src/runtime/plan.js";
 import type { AgentEvent } from "./agent-event.js";
 
@@ -27,12 +28,25 @@ export type TraceId = string;
 
 // ─── 输入 ──────────────────────────────────────────────
 
-/** Runtime 任务输入（第一版：自然语言 + 可选运行配置） */
+/** 调用方提供给 Runtime 的环境事实提示（尚未解析为 Environment State）。 */
+export interface AgentRunContextInput {
+  location?: LocationRequest;
+}
+
+/** Runtime 任务输入（第一版：自然语言 + 可选运行配置/环境提示） */
 export interface AgentRunInput {
   /** 用户原始输入（自然语言） */
   rawText: string;
+  /** 调用方提供的环境事实提示，如用户当前位置来源。 */
+  context?: AgentRunContextInput;
   /** 运行配置（画像/天气/降级开关等，按领域扩展） */
   config?: Record<string, unknown>;
+}
+
+/** Runtime 已解析的环境事实，不等同于 AgentRunInput.context。 */
+export interface AgentEnvironmentState {
+  // Invariant: AgentState.environment 只描述 Runtime 已解析的环境事实。
+  location?: ResolvedLocation;
 }
 
 // ─── 消息流（Inbound / Outbound） ──────────────────────
@@ -239,6 +253,8 @@ export interface AgentState {
   traceId: TraceId;
   /** 任务输入 */
   input: AgentRunInput;
+  /** Runtime 已解析的环境事实。 */
+  environment: AgentEnvironmentState;
   /** 运行状态 */
   readonly status: AgentRunStatus;
   /** 当前执行步骤（步骤名/ID，v1 为字符串） */
@@ -282,6 +298,7 @@ export function createAgentState(
     sessionId: opts.sessionId ?? newAgentId("sess"),
     traceId: opts.traceId ?? newAgentId("trace"),
     input,
+    environment: {},
     status: "pending",
     planning: { stage: "intent_parsing", errors: [] },
     messages: [],

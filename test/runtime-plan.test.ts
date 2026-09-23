@@ -13,6 +13,7 @@ describe("Runtime Plan / Executor", () => {
     const plan = createActivityRuntimePlan();
 
     expect(plan.steps.map((s) => s.type)).toEqual([
+      "context_resolution",
       "intent_parsing",
       "follow_up_questions",
       "candidate_generation",
@@ -20,9 +21,11 @@ describe("Runtime Plan / Executor", () => {
       "fine_scheduling",
     ]);
 
-    expect(plan.steps[1].dependsOn).toEqual(["intent_parsing"]);
-    expect(plan.steps[4].dependsOn).toEqual(["feasibility_check"]);
-    expect(plan.steps[2].writes).toEqual(["planning.candidates"]);
+    expect(plan.steps[0].dependsOn).toEqual([]);
+    expect(plan.steps[1].dependsOn).toEqual([]);
+    expect(plan.steps[3].dependsOn).toEqual(["context_resolution", "follow_up_questions"]);
+    expect(plan.steps[5].dependsOn).toEqual(["feasibility_check"]);
+    expect(plan.steps[3].writes).toEqual(["planning.candidates"]);
   });
 
   it("validates a DAG and rejects missing dependencies", () => {
@@ -140,6 +143,7 @@ describe("Runtime Plan / Executor", () => {
 
     const next = await executePlan(plan, state, {
       handlers: {
+        context_resolution: async (current) => current,
         intent_parsing: async (current) => {
           executed.push("parse");
           return current;

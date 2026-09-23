@@ -20,9 +20,15 @@ import {
   type AgentRunStatus,
 } from "../../spec/agent.js";
 import type {
+  PlanningTermination,
   PlanningState,
   StructuredConstraints,
 } from "../../spec/types.js";
+import type { LocationRequest } from "../../spec/location.js";
+import type {
+  GetUserLocationInput,
+  GetUserLocationOutput,
+} from "../../spec/tools.js";
 import {
   applyProfileToConstraints,
   resolveWeights,
@@ -47,6 +53,7 @@ import {
 import type { PipelineOptions, PlanResult } from "./engine.js";
 import { interpretFollowUpAnswers } from "./follow-up.js";
 import { mergeTurnConstraints } from "../conversation/memory.js";
+import { createInitialSearchPolicy } from "./search-policy.js";
 
 export interface ActivityPlannerOptions {
   maxReplans?: number;
@@ -86,6 +93,16 @@ function stepData(
 ): Record<string, unknown> | undefined {
   const planning = current.planning;
   switch (step.type) {
+    case "context_resolution":
+      return {
+        locationResolved: current.environment.location !== undefined,
+        ...(current.environment.location
+          ? {
+              locationSource: current.environment.location.source,
+              fallback: current.environment.location.source === "default",
+            }
+          : {}),
+      };
     case "intent_parsing":
       return {
         scenario: planning.constraints?.group.scenario,
@@ -106,6 +123,10 @@ function stepData(
         confidence: planning.decision?.confidence,
       };
   }
+}
+
+function toLocationToolInput(location?: LocationRequest): GetUserLocationInput {
+  return location ? { ...location } : { kind: "default" };
 }
 
 function finishRun(
@@ -188,9 +209,30 @@ export class ActivityPlanner {
         timeoutMs: 10_000,
         maxRetries: 1,
         signal: opts.signal,
+        registry: opts.toolRegistry,
       });
 
       const handlers = {
+        context_resolution: async (current: AgentState) => {
+          throwIfAborted(opts.signal);
+          const response = await toolExecutor.execute<GetUserLocationInput, GetUserLocationOutput>(
+            "get_user_location",
+            toLocationToolInput(current.input.context?.location),
+          );
+          if (response.status === "error") {
+            const message = `context_resolution 失败 [${response.errorInfo.code}] ${response.errorInfo.message}`;
+            current.errors.push(message);
+            current.planning.errors = [...current.planning.errors, message];
+            run.transition("failed", {
+              reason: "context_resolution_failed",
+              source: "runtime",
+              details: { errorCode: response.errorInfo.code },
+            });
+            return current;
+          }
+          current.environment.location = response.data;
+          return current;
+        },
         intent_parsing: async (current: AgentState) => {
           throwIfAborted(opts.signal);
           const planning = await stage1_parseIntent(
@@ -201,9 +243,7 @@ export class ActivityPlanner {
           );
           planning.constraints = mergeTurnConstraints(opts.baseConstraints, planning.constraints!, rawText);
           weightOverride = applyPersonalization(planning, opts, run);
-          planning.searchPolicy ??= {
-            radiusKm: planning.constraints!.distance.maxKm,
-          };
+          planning.searchPolicy ??= createInitialSearchPolicy(planning.constraints!);
           planning.planRevision ??= 0;
           current.planning = planning;
           agentState.planning = planning;
@@ -232,9 +272,20 @@ export class ActivityPlanner {
         },
         candidate_generation: async (current: AgentState) => {
           throwIfAborted(opts.signal);
+          if (!current.environment.location) {
+            const message = "Candidate generation requires resolved environment location";
+            current.errors.push(message);
+            current.planning.errors = [...current.planning.errors, message];
+            run.transition("failed", {
+              reason: "environment_invariant_failed",
+              source: "runtime",
+            });
+            return current;
+          }
           const planning = await stage3_generateCandidates(
             current.planning,
             toolExecutor,
+            { userLocation: current.environment.location },
           );
           current.planning = planning;
           agentState.planning = planning;
@@ -258,6 +309,7 @@ export class ActivityPlanner {
             weightOverride,
             weather: opts.weather,
             date: opts.date,
+            environmentLocation: current.environment.location,
           });
           current.planning = planning;
           agentState.planning = planning;
@@ -356,6 +408,25 @@ export class ActivityPlanner {
       const finalEvaluation = evaluateAgentState(agentState);
       agentState.constraintEvaluations = finalEvaluation.evaluation ? [finalEvaluation.evaluation] : [];
 
+      // A termination is a final business conclusion, not an intermediate stage result.
+      // Replanning has been exhausted at this point; infrastructure/runtime failures
+      // deliberately leave it absent.
+      if (!state.termination
+        && agentState.status === "running"
+        && agentState.currentStep === "fine_scheduling"
+        && agentState.errors.length === 0
+        && !agentState.toolCalls.some((call) => call.status === "error")) {
+        const termination: PlanningTermination | undefined = state.selectedPlan
+          ? { reason: "plan_selected", code: "PLAN_SELECTED" }
+          : !state.decision
+            ? {
+                reason: "no_feasible_plan",
+                code: state.candidates?.length ? "NO_SELECTABLE_PLAN" : "NO_CANDIDATES",
+              }
+            : undefined;
+        if (termination) state.termination = termination;
+      }
+
       if (state.selectedPlan && finalEvaluation.passed) {
         const message = agentState.replanCount
           ? `方案规划完成（已重规划 ${agentState.replanCount} 次）`
@@ -377,6 +448,7 @@ export class ActivityPlanner {
         reason: message,
       });
     } catch (err) {
+      agentState.planning.termination = undefined;
       const cancelled = opts.signal?.aborted === true;
       const message = cancelled
         ? `运行已取消: ${opts.signal?.reason instanceof Error ? opts.signal.reason.message : String(opts.signal?.reason ?? "user_cancelled")}`

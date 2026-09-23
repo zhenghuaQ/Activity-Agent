@@ -1,9 +1,11 @@
-import type { Attraction, BreakPlace, GeoLocation, Restaurant } from "../../../spec/types.js";
+import type { Attraction, BreakPlace, GeoLocation, Place, Restaurant } from "../../../spec/types.js";
 import type { ActivityDataProviderV1, BreakPlaceQuery, DestinationQuery, PlaceQuery,
   ProviderCapabilities, ProviderContext, SearchArea } from "../../../spec/datasource.js";
 import { throwIfAborted } from "../../runtime/abort.js";
 import { DataProviderError } from "../provider-error.js";
 import { withProviderSource } from "../provider-utils.js";
+import type { PlaceSearchRequest, PlaceSearchResult } from "../../../spec/place-search.js";
+import { searchPlacePool } from "../place-search.js";
 
 interface HttpEnvelope<T> { apiVersion: 1; data: T }
 
@@ -16,7 +18,7 @@ export interface HttpDataProviderOptions {
   capabilities?: Partial<ProviderCapabilities>;
 }
 
-const ALL_CAPABILITIES: ProviderCapabilities = { destinationResolution: true, attractions: true,
+const ALL_CAPABILITIES: ProviderCapabilities = { places: true, destinationResolution: true, attractions: true,
   restaurants: true, breakPlaces: true, geocoding: true, lookupById: true };
 
 /** Activity Data Provider v1 的语言无关 HTTP 客户端。 */
@@ -50,17 +52,39 @@ export class HttpDataProvider implements ActivityDataProviderV1 {
     }
     return area;
   }
+  async searchPlaces(request: PlaceSearchRequest, context?: ProviderContext): Promise<PlaceSearchResult> {
+    const categories = request.intent.categories ?? [];
+    const query: PlaceQuery = { origin: request.spatial.origin, radiusKm: request.spatial.maxKm,
+      keywords: request.intent.query ? [request.intent.query] : undefined, limit: request.limit };
+    const places: Place[] = [];
+    if (categories.length === 0 || categories.some((c) => ["attraction", "museum", "park", "gallery"].includes(c))) {
+      places.push(...this.validatePlaces(query, withProviderSource(this.id,
+        await this.arrayRequest<Attraction>("/v1/places/attractions/search", { query }, context))));
+    }
+    if (categories.length === 0 || categories.includes("restaurant")) {
+      places.push(...this.validatePlaces(query, withProviderSource(this.id,
+        await this.arrayRequest<Restaurant>("/v1/places/restaurants/search", { query }, context))));
+    }
+    if (categories.length === 0 || categories.some((c) => ["break", "cafe", "tea_house", "dessert", "bookstore", "kids_indoor_play"].includes(c))) {
+      places.push(...this.validatePlaces(query, withProviderSource(this.id,
+        await this.arrayRequest<BreakPlace>("/v1/places/breaks/search", { query }, context))));
+    }
+    return searchPlacePool(places, request);
+  }
+  /** @deprecated Use searchPlaces/search_places. */
   async searchAttractions(query: PlaceQuery, context?: ProviderContext): Promise<Attraction[]> {
-    return this.validatePlaces(query, withProviderSource(this.id,
-      await this.arrayRequest<Attraction>("/v1/places/attractions/search", { query }, context)));
+    const result = await this.searchPlaces({ spatial: { origin: query.origin, maxKm: query.radiusKm }, intent: { categories: ["attraction"], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is Attraction => p.type === "attraction");
   }
+  /** @deprecated Use searchPlaces/search_places. */
   async searchRestaurants(query: PlaceQuery, context?: ProviderContext): Promise<Restaurant[]> {
-    return this.validatePlaces(query, withProviderSource(this.id,
-      await this.arrayRequest<Restaurant>("/v1/places/restaurants/search", { query }, context)));
+    const result = await this.searchPlaces({ spatial: { origin: query.origin, maxKm: query.radiusKm }, intent: { categories: ["restaurant"], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is Restaurant => p.type === "restaurant");
   }
+  /** @deprecated Use searchPlaces/search_places. */
   async searchBreakPlaces(query: BreakPlaceQuery, context?: ProviderContext): Promise<BreakPlace[]> {
-    return this.validatePlaces(query, withProviderSource(this.id,
-      await this.arrayRequest<BreakPlace>("/v1/places/breaks/search", { query }, context)));
+    const result = await this.searchPlaces({ spatial: { origin: query.origin, maxKm: query.radiusKm }, intent: { categories: ["break", ...(query.breakSubtype ? [query.breakSubtype] : [])], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is BreakPlace => p.type === "break");
   }
   async getAttractionById(id: string, context?: ProviderContext): Promise<Attraction | undefined> {
     const value = await this.request<Attraction | null>(`/v1/places/attractions/${encodeURIComponent(id)}`, undefined, context, "GET");

@@ -19,6 +19,7 @@ import {
 } from "../runtime/event-bus.js";
 import { defaultActivityPlanner } from "./activity-planner.js";
 import { AgentRun } from "../runtime/agent-run.js";
+import type { ToolRegistryLike } from "../runtime/tool-executor.js";
 
 export interface PlanResult {
   success: boolean;
@@ -40,6 +41,8 @@ export interface PipelineOptions {
   weather?: import("../../spec/decision.js").WeatherCondition;
   date?: Date;
   signal?: AbortSignal;
+  /** Optional per-runtime Tool registry, including injected LocationResolver. */
+  toolRegistry?: ToolRegistryLike;
 }
 
 export type PlanningStageName = import("../../spec/types.js").PlanningStage;

@@ -30,7 +30,34 @@ export interface EscalationOptions {
 }
 
 interface DistanceInput {
-  distance: { maxKm: number; homeLocation: unknown };
+  distance: { maxKm: number };
+  origin: unknown;
+}
+
+export interface SpatialInput {
+  spatial: { origin: unknown; maxKm: number };
+}
+
+export async function withSpatialRadiusEscalation<I extends SpatialInput, O>(
+  baseInput: I,
+  run: (input: I) => Promise<O[]>,
+  opts: EscalationOptions = {},
+): Promise<EscalationResult<O>> {
+  const minCount = opts.minCount ?? 1;
+  const maxRadius = opts.maxRadius ?? 30;
+  const factor = opts.factor ?? 1.6;
+  const maxSteps = opts.maxSteps ?? 3;
+  let radius = baseInput.spatial.maxKm;
+  let items = await run(baseInput);
+  if (items.length >= minCount) return { items, radiusUsed: radius, escalated: false };
+  for (let step = 0; step < maxSteps && radius < maxRadius; step++) {
+    radius = Math.min(maxRadius, Math.round(radius * factor));
+    const input = { ...baseInput, spatial: { ...baseInput.spatial, maxKm: radius } } as I;
+    items = await run(input);
+    if (items.length >= minCount) return { items, radiusUsed: radius, escalated: true, note: `候选不足，已扩检索半径至 ${radius}km` };
+  }
+  return { items, radiusUsed: radius, escalated: radius > baseInput.spatial.maxKm,
+    note: items.length === 0 ? `半径扩至 ${radius}km 仍无结果（已熔断，建议放宽条件）` : `半径扩至 ${radius}km` };
 }
 
 /**

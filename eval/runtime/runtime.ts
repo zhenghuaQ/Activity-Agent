@@ -1,13 +1,17 @@
 // ============================================================
-// eval/runtime.ts — Agent Runtime Eval Runner
+// eval/runtime/runtime.ts — Agent Runtime Eval Runner
 // ============================================================
 
-import { parseIntent } from "../src/intent/parser.js";
-import type { PlanResult } from "../src/planner/engine.js";
+import { parseIntent } from "../../src/intent/parser.js";
+import type { PlanResult } from "../../src/planner/engine.js";
 import {
   AgentRuntime,
   createAgentInput,
-} from "../src/runtime/index.js";
+} from "../../src/runtime/index.js";
+import { createToolRegistry } from "../../src/tools/registry.js";
+import { HOME } from "../../src/data/mock.js";
+import { FixtureLocationResolver } from "../shared/location.js";
+import { MockProvider } from "../../src/data/providers/mock-provider.js";
 import type { EvalCaseResult } from "./types.js";
 import { calcPlanMetrics } from "./metrics.js";
 
@@ -16,7 +20,16 @@ export async function runRuntime(
   caseName: string,
 ): Promise<EvalCaseResult> {
   const start = performance.now();
-  const runtime = new AgentRuntime();
+  const dataProvider = new MockProvider();
+  const runtime = new AgentRuntime({
+    toolRegistry: createToolRegistry({
+      dataProvider,
+      locationResolver: new FixtureLocationResolver({
+        location: { ...HOME },
+        source: "default",
+      }),
+    }),
+  });
 
   try {
     const submission = await runtime.submit(

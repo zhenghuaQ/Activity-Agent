@@ -15,6 +15,7 @@ import {
 } from "../planner/activity-planner.js";
 import {
   createSubmission,
+  toAgentRunInput,
   type AgentInput,
   type Submission,
   type SubmissionResult,
@@ -38,6 +39,7 @@ import {
 import { isFollowUpQuestions, validateFollowUpAnswers, type FollowUpSelection } from "../../spec/follow-up.js";
 import type { FollowUpQuestion } from "../../spec/types.js";
 import { throwIfAborted } from "./abort.js";
+import type { ToolRegistryLike } from "./tool-executor.js";
 
 interface ActiveRun {
   runId: RunId;
@@ -61,6 +63,8 @@ export interface AgentRuntimeOptions {
   runOptions?: PipelineOptions;
   planner?: Pick<ActivityPlanner, "run">;
   eventBus?: AgentEventBus;
+  /** Optional per-runtime tool registry for infrastructure injection. */
+  toolRegistry?: ToolRegistryLike;
 }
 
 export class SubmissionRouter {
@@ -146,7 +150,7 @@ export class SubmissionRouter {
 
     const runId = newAgentId("run");
     const run = AgentRun.create(
-      { rawText: submission.input.content, config: submission.input.config },
+      toAgentRunInput(submission.input),
       {
         runId,
         sessionId: submission.sessionId,
@@ -217,6 +221,7 @@ export class SubmissionRouter {
         sessionId: submission.sessionId,
         traceId: submission.traceId,
         signal: controller.signal,
+        ...(this.options.toolRegistry ? { toolRegistry: this.options.toolRegistry } : {}),
         requestFollowUp: config.interactive === true
           ? questions => this.waitForAnswers(active, submission, questions)
           : undefined,

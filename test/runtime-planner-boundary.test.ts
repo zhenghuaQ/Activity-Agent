@@ -12,6 +12,7 @@ describe("Runtime → ActivityPlanner 边界", () => {
 
     const defaultPlan = createActivityRuntimePlan();
     expect(defaultPlan.steps.map((step) => step.id)).toEqual([
+      "context_resolution",
       "intent_parsing",
       "follow_up_questions",
       "candidate_generation",

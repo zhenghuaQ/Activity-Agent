@@ -1,5 +1,5 @@
 // ============================================================
-// eval/baseline.ts — 重构前风格的固定 5-stage Baseline
+// eval/runtime/baseline.ts — 重构前风格的固定 5-stage Baseline
 //
 // 目的不是保留旧代码，而是提供一个可重复的对照组：
 // 直接按原来的 stage1 -> stage2 -> stage3 -> stage4 -> stage5
@@ -12,8 +12,10 @@ import {
   stage3_generateCandidates,
   stage4_feasibilityCheck,
   stage5_selectBest,
-} from "../src/planner/engine.js";
-import type { PlanningState, StructuredConstraints } from "../spec/types.js";
+} from "../../src/planner/engine.js";
+import type { PlanningState, StructuredConstraints } from "../../spec/types.js";
+import type { PlanningEnvironment } from "../../src/planner/stages.js";
+import { HOME } from "../../src/data/mock.js";
 import type { EvalCaseResult } from "./types.js";
 import { calcPlanMetrics } from "./metrics.js";
 
@@ -27,11 +29,14 @@ export async function runBaseline(
     stage: "intent_parsing",
     errors: [],
   };
+  const environment: PlanningEnvironment = {
+    userLocation: { location: { ...HOME }, source: "default" },
+  };
 
   try {
     state = await stage1_parseIntent(state, rawText, parseFn);
     state = await stage2_followUp(state);
-    state = await stage3_generateCandidates(state);
+    state = await stage3_generateCandidates(state, undefined, environment);
     state = await stage4_feasibilityCheck(state);
     state = await stage5_selectBest(state);
 

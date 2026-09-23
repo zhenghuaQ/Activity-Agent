@@ -103,7 +103,7 @@ const constraints: StructuredConstraints = {
     },
   },
   timeWindow: { start: "14:00", end: "18:00", durationHours: 4 },
-  distance: { maxKm: 15, homeLocation: HOME },
+  distance: { hardMaxKm: 15 },
   extraHints: [],
 };
 

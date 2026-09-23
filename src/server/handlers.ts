@@ -29,7 +29,8 @@ import {
   defaultAgentEventBus,
   type AgentEventBus,
 } from "../runtime/event-bus.js";
-import { newAgentId } from "../../spec/agent.js";
+import { newAgentId, type AgentRunContextInput } from "../../spec/agent.js";
+import type { LocationRequest } from "../../spec/location.js";
 import {
   createAgentInput,
   createSubmission,
@@ -53,6 +54,7 @@ interface DecideBody {
   profileId?: string;
   autoSegment?: boolean;
   weather?: WeatherCondition;
+  context?: AgentRunContextInput;
 }
 
 interface ProfileBody {
@@ -103,6 +105,50 @@ function badRequest(message: string): ChannelResponse {
   return { statusCode: 400, body: { error: "bad_request", message } };
 }
 
+function isLocationRequest(value: unknown): value is LocationRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const request = value as Record<string, unknown>;
+  switch (request.kind) {
+    case "coords":
+      return typeof request.lat === "number" && Number.isFinite(request.lat)
+        && typeof request.lng === "number" && Number.isFinite(request.lng);
+    case "address":
+      return typeof request.address === "string" && request.address.trim().length > 0;
+    case "ip":
+      return request.ip === undefined || typeof request.ip === "string";
+    case "default":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isAgentRunContext(value: unknown): value is AgentRunContextInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const context = value as Record<string, unknown>;
+  return context.location === undefined || isLocationRequest(context.location);
+}
+
+/** Optional stream-query adapter; it never infers location from proxy headers. */
+function locationContextFromQuery(query: Record<string, string>): AgentRunContextInput | null | undefined {
+  const lat = query.lat;
+  const lng = query.lng;
+  const address = query.address;
+  const ip = query.ip;
+  const supplied = [lat !== undefined || lng !== undefined, address !== undefined, ip !== undefined].filter(Boolean).length;
+  if (supplied === 0) return undefined;
+  if (supplied !== 1) return null;
+  if (lat !== undefined || lng !== undefined) {
+    const parsedLat = Number(lat);
+    const parsedLng = Number(lng);
+    if (!Number.isFinite(parsedLat) || !Number.isFinite(parsedLng)) return null;
+    return { location: { kind: "coords", lat: parsedLat, lng: parsedLng, ...(query.city ? { city: query.city } : {}) } };
+  }
+  if (address !== undefined && address.trim()) return { location: { kind: "address", address: address.trim(), ...(query.city ? { city: query.city } : {}) } };
+  if (ip !== undefined) return { location: { kind: "ip", ...(ip ? { ip } : {}) } };
+  return null;
+}
+
 /** HTTP Channel 提供可选的 Session ID；未提供时为本次请求创建独立会话，避免不同用户共享默认 Session。 */
 function resolveSession(
   req: ChannelRequest,
@@ -144,6 +190,7 @@ async function decide(
   if (body.text.length > 8000 || (body.segment !== undefined && !ALL_SEGMENTS.includes(body.segment))
     || (body.sessionId !== undefined && typeof body.sessionId !== "string")
     || (body.profileId !== undefined && typeof body.profileId !== "string")
+    || (body.context !== undefined && !isAgentRunContext(body.context))
     || (body.autoSegment !== undefined && typeof body.autoSegment !== "boolean")
     || (body.weather !== undefined && !["clear", "rain", "snow", "hot", "cold", "unknown"].includes(body.weather))) return badRequest("决策参数无效");
   const profile = await resolveRequestProfile(body.profileId, body.segment);
@@ -157,6 +204,7 @@ async function decide(
       weather: body.weather,
       parseFn: pickParseFn(),
       baseConstraints: conversation.memory.constraints,
+      context: body.context,
     }),
     { ...session, op: { type: "turn" }, signal: req.signal },
   );
@@ -227,6 +275,8 @@ async function decideStream(
   if (req.query.interactive !== undefined && !["0", "1"].includes(req.query.interactive)) return badRequest("interactive 无效");
   if (q.length > 8000 || (req.query.segment && !ALL_SEGMENTS.includes(req.query.segment as UserSegment))
     || (req.query.weather && !["clear", "rain", "snow", "hot", "cold", "unknown"].includes(req.query.weather))) return badRequest("决策参数无效");
+  const context = locationContextFromQuery(req.query);
+  if (context === null) return badRequest("location 参数无效");
 
   const segment = req.query.segment as UserSegment | undefined;
   const weather = req.query.weather as WeatherCondition | undefined;
@@ -252,6 +302,7 @@ async function decideStream(
         parseFn: pickParseFn(),
         interactive: req.query.interactive === "1",
         baseConstraints: conversation.memory.constraints,
+        context,
       }),
       {
         ...session,

@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { inboundUserInput } from "../spec/agent.js";
+import type { LocationRequest } from "../spec/location.js";
 import {
   AgentRuntime,
   InMemorySessionStore,
   SessionScheduler,
   createAgentInput,
   createSubmission,
+  toAgentRunInput,
 } from "../src/runtime/index.js";
 
 
@@ -20,6 +22,40 @@ describe("submission runtime", () => {
     expect(submission.traceId).toBe("trace_1");
     expect(submission.op.type).toBe("turn");
     expect(submission.sessionRetention).toBe("retained");
+  });
+
+  it("carries an explicit location context through submission normalization", () => {
+    const context = { location: { kind: "coords" as const, lat: 31.23, lng: 121.47 } };
+    const input = createAgentInput("上海周末计划", { context });
+    const shorthand = createAgentInput("上海周末计划", { location: context.location });
+    const submission = createSubmission(input, { sessionId: "sess_location" });
+
+    expect(input.context).toEqual(context);
+    expect(shorthand.context).toEqual(context);
+    expect(toAgentRunInput(submission.input)).toMatchObject({
+      rawText: "上海周末计划",
+      context,
+    });
+
+    const direct = createSubmission(
+      { rawText: "直接提交", context },
+      { sessionId: "sess_location_direct" },
+    );
+    expect(toAgentRunInput(direct.input).context).toEqual(context);
+  });
+
+  it("keeps the legacy string-only input and all LocationRequest variants usable", () => {
+    const legacy = createAgentInput("xxx");
+    expect(legacy.content).toBe("xxx");
+    expect(legacy.context).toBeUndefined();
+
+    const requests: LocationRequest[] = [
+      { kind: "coords", lat: 31.23, lng: 121.47 },
+      { kind: "address", address: "上海市静安区" },
+      { kind: "ip", ip: "203.0.113.1" },
+      { kind: "default" },
+    ];
+    expect(requests).toHaveLength(4);
   });
 
   it("routes non-turn ops without entering the planning pipeline", async () => {

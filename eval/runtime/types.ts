@@ -1,5 +1,5 @@
 // ============================================================
-// eval/types.ts — Eval Harness V2 统一结果模型
+// eval/runtime/types.ts — Runtime Regression 结果模型
 // ============================================================
 
 export type EvalRunnerKind = "baseline" | "runtime";

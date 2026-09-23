@@ -1,9 +1,9 @@
 // ============================================================
-// eval/metrics.ts — 方案质量评分
+// eval/runtime/metrics.ts — Runtime Regression 方案质量指标
 // ============================================================
 
-import type { Plan } from "../spec/types.js";
-import type { CongestionLevel } from "../spec/transit.js";
+import type { Plan } from "../../spec/types.js";
+import type { CongestionLevel } from "../../spec/transit.js";
 
 /** 单方案的 metrics */
 export interface PlanMetrics {

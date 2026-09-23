@@ -173,6 +173,26 @@ function timeoutResponse<T>(
   );
 }
 
+/** 普通 Runtime trace 只保留定位输入的形状，不暴露精确坐标。 */
+function traceInput(toolName: string, input: unknown): unknown {
+  if (toolName === "search_places" && typeof input === "object" && input !== null) {
+    const value = input as Record<string, unknown>;
+    const spatial = value.spatial as Record<string, unknown> | undefined;
+    if (spatial && typeof spatial === "object") {
+      return { ...value, spatial: { ...spatial, origin: { coordinatesProvided: true } } };
+    }
+    return input;
+  }
+  if (toolName !== "get_user_location" || typeof input !== "object" || input === null) return input;
+  const { lat, lng, address, ip, ...rest } = input as Record<string, unknown>;
+  return {
+    ...rest,
+    ...(lat !== undefined || lng !== undefined ? { coordinatesProvided: true } : {}),
+    ...(address !== undefined ? { addressProvided: true } : {}),
+    ...(ip !== undefined ? { ipProvided: true } : {}),
+  };
+}
+
 
 function circuitOpenResponse<T>(
   toolName: string,
@@ -204,7 +224,7 @@ function recordToolCall(
   const record: AgentToolCall = {
     id: newAgentId("toolcall"),
     toolName,
-    input,
+    input: traceInput(toolName, input),
     status: response.status,
     durationMs: response.stats.durationMs,
     startedAt,
@@ -268,7 +288,7 @@ export class ToolExecutor {
     this.run.emit({
       type: "tool_call",
       toolName,
-      payload: { input, logicalCallId },
+      payload: { input: traceInput(toolName, input), logicalCallId },
     });
 
     const registry = this.options.registry ?? (toolRegistry as unknown as ToolRegistryLike);

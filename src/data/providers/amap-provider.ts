@@ -12,6 +12,7 @@ import type {
   BreakPlace,
   GeoLocation,
   LocalFeatureTag,
+  Place,
   Restaurant,
 } from "../../../spec/types.js";
 import type {
@@ -23,11 +24,13 @@ import type {
   ProviderContext,
   SearchArea,
 } from "../../../spec/datasource.js";
+import type { PlaceSearchRequest, PlaceSearchResult } from "../../../spec/place-search.js";
 import { withDistanceFrom } from "../../core/geo.js";
 import { TtlLruCache } from "../../core/cache.js";
 import { childLogger } from "../../core/logger.js";
 import { throwIfAborted } from "../../runtime/abort.js";
 import { searchCenter, withProviderSource } from "../provider-utils.js";
+import { searchPlacePool } from "../place-search.js";
 
 const log = childLogger("data:amap");
 
@@ -81,7 +84,7 @@ export class AmapProvider implements ActivityDataProviderV1 {
   readonly apiVersion = 1 as const;
   readonly id = "amap";
   readonly name = "amap";
-  readonly capabilities: ProviderCapabilities = { destinationResolution: true, attractions: true,
+  readonly capabilities: ProviderCapabilities = { places: true, destinationResolution: true, attractions: true,
     restaurants: true, breakPlaces: true, geocoding: true, lookupById: false };
   private readonly apiKey: string;
   private readonly fallback: ActivityDataProviderV1;
@@ -145,7 +148,7 @@ export class AmapProvider implements ActivityDataProviderV1 {
     return this.fallback.resolveDestination(query, context);
   }
 
-  async searchAttractions(query: PlaceQuery, context: ProviderContext = {}): Promise<Attraction[]> {
+  private async searchAttractionsCore(query: PlaceQuery, context: ProviderContext = {}): Promise<Attraction[]> {
     const signal = context.signal;
     throwIfAborted(signal);
     try {
@@ -186,7 +189,7 @@ export class AmapProvider implements ActivityDataProviderV1 {
     }
   }
 
-  async searchRestaurants(query: PlaceQuery, context: ProviderContext = {}): Promise<Restaurant[]> {
+  private async searchRestaurantsCore(query: PlaceQuery, context: ProviderContext = {}): Promise<Restaurant[]> {
     const signal = context.signal;
     throwIfAborted(signal);
     try {
@@ -230,7 +233,7 @@ export class AmapProvider implements ActivityDataProviderV1 {
     }
   }
 
-  async searchBreakPlaces(query: BreakPlaceQuery, context: ProviderContext = {}): Promise<BreakPlace[]> {
+  private async searchBreakPlacesCore(query: BreakPlaceQuery, context: ProviderContext = {}): Promise<BreakPlace[]> {
     const signal = context.signal;
     throwIfAborted(signal);
     try {
@@ -272,6 +275,42 @@ export class AmapProvider implements ActivityDataProviderV1 {
     } catch (err) {
       return this.degrade(err, signal, () => this.fallback.searchBreakPlaces(query, context));
     }
+  }
+
+  async searchPlaces(request: PlaceSearchRequest, context: ProviderContext = {}): Promise<PlaceSearchResult> {
+    const categories = request.intent.categories ?? [];
+    const attraction = categories.length === 0 || categories.some((c) => ["attraction", "museum", "park", "gallery"].includes(c));
+    const restaurant = categories.length === 0 || categories.includes("restaurant");
+    const rest = categories.length === 0 || categories.some((c) => ["break", "cafe", "tea_house", "dessert", "bookstore", "kids_indoor_play"].includes(c));
+    const query: PlaceQuery = {
+      origin: request.spatial.origin,
+      radiusKm: request.spatial.maxKm,
+      keywords: request.intent.query ? [request.intent.query] : undefined,
+      limit: request.limit,
+    };
+    const places: Place[] = [];
+    if (attraction) places.push(...await this.searchAttractionsCore(query, context));
+    if (restaurant) places.push(...await this.searchRestaurantsCore(query, context));
+    if (rest) places.push(...await this.searchBreakPlacesCore({ ...query, breakSubtype: "cafe" }, context));
+    return searchPlacePool(places, request);
+  }
+
+  /** @deprecated Use searchPlaces/search_places. */
+  async searchAttractions(query: PlaceQuery, context?: ProviderContext): Promise<Attraction[]> {
+    const result = await this.searchPlaces({ spatial: { origin: searchCenter(query), maxKm: query.radiusKm }, intent: { categories: ["attraction"], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is Attraction => p.type === "attraction");
+  }
+
+  /** @deprecated Use searchPlaces/search_places. */
+  async searchRestaurants(query: PlaceQuery, context?: ProviderContext): Promise<Restaurant[]> {
+    const result = await this.searchPlaces({ spatial: { origin: searchCenter(query), maxKm: query.radiusKm }, intent: { categories: ["restaurant"], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is Restaurant => p.type === "restaurant");
+  }
+
+  /** @deprecated Use searchPlaces/search_places. */
+  async searchBreakPlaces(query: BreakPlaceQuery, context?: ProviderContext): Promise<BreakPlace[]> {
+    const result = await this.searchPlaces({ spatial: { origin: searchCenter(query), maxKm: query.radiusKm }, intent: { categories: ["break", ...(query.breakSubtype ? [query.breakSubtype] : [])], query: query.keywords?.[0] }, limit: query.limit }, context);
+    return result.places.map((c) => c.detail).filter((p): p is BreakPlace => p.type === "break");
   }
 
   async getAttractionById(id: string, context?: ProviderContext): Promise<Attraction | undefined> {

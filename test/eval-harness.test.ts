@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { parseIntent } from "../src/intent/parser.js";
-import { runBaseline } from "../eval/baseline.js";
-import { runRuntime } from "../eval/runtime.js";
+import { runBaseline } from "../eval/runtime/baseline.js";
+import { runRuntime } from "../eval/runtime/runtime.js";
 
 const input = "周末带老婆孩子下午出去玩4个小时，预算适中";
 
-describe("Evaluation Harness V2", () => {
+describe("Runtime Regression Suite", () => {
   it("can run the baseline and runtime against the same deterministic input", async () => {
     const [baseline, runtime] = await Promise.all([
       runBaseline(input, parseIntent, "smoke"),

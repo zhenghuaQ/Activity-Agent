@@ -25,6 +25,7 @@ import type {
   Restaurant,
   StructuredConstraints,
 } from "../../spec/types.js";
+import type { ResolvedLocation } from "../../spec/location.js";
 import { calcFeasibilityScore, rankCandidates } from "../decision/feasibility.js";
 import { LeadRoleStrategy } from "../../spec/types.js";
 import { toolRegistry } from "../tools/registry.js";
@@ -32,10 +33,17 @@ import { ToolExecutor } from "../runtime/tool-executor.js";
 import { parseIntentWithLLM } from "../llm/intent.js";
 import { DELIVERY_ITEMS } from "../data/mock.js";
 import type { DeliveryItem } from "../../spec/types.js";
-import { scheduleActivities, getBreakSubtype } from "./scheduler.js";
+import { scheduleActivities } from "./scheduler.js";
 import { filterWithinRadius } from "../core/geo.js";
-import { runDecision, withRadiusEscalation } from "../decision/index.js";
+import { runDecision, withSpatialRadiusEscalation } from "../decision/index.js";
 import type { SearchArea } from "../../spec/datasource.js";
+import type { PlaceCandidate, PlaceSearchRequest, PlaceSearchTask } from "../../spec/place-search.js";
+import { createInitialSearchPolicy } from "./search-policy.js";
+
+/** Candidate generation 的只读运行环境；位置唯一来源是 Runtime Environment。 */
+export interface PlanningEnvironment {
+  userLocation: ResolvedLocation;
+}
 
 // ─── Stage 1: 意图解析 ──────────────────────────────
 
@@ -150,14 +158,25 @@ function applyFollowUpPatch(
 
 export async function stage3_generateCandidates(
   state: PlanningState,
-  toolExecutor?: ToolExecutor
+  toolExecutor?: ToolExecutor,
+  environment?: PlanningEnvironment,
 ): Promise<PlanningState> {
   if (!state.constraints) {
     return { ...state, stage: "candidate_generation", errors: ["需要先执行 Stage 1"] };
   }
 
-  const { group, timeWindow, distance } = state.constraints;
-  const searchRadiusKm = state.searchPolicy?.radiusKm ?? distance.maxKm;
+  const resolvedEnvironmentLocation = environment?.userLocation?.location;
+  if (!resolvedEnvironmentLocation) {
+    return {
+      ...state,
+      stage: "candidate_generation",
+      candidates: [],
+      errors: [...(state.errors ?? []), "Candidate generation requires resolved environment location"],
+    };
+  }
+
+  const { group, timeWindow } = state.constraints;
+  const searchRadiusKm = state.searchPolicy?.radiusKm ?? createInitialSearchPolicy(state.constraints).radiusKm;
   const leadRole = group.leadRole;
   const errors: string[] = [];
   const planningNotes: string[] = [];
@@ -175,15 +194,10 @@ export async function stage3_generateCandidates(
       errors: [`目的地不可用: ${result.errorInfo.message}`] };
     resolvedSearchArea = result.data;
   }
-  const searchOrigin = resolvedSearchArea?.center ?? distance.homeLocation;
-  const providerScope = { destination: state.constraints.destination, searchArea: resolvedSearchArea };
-
-  // ── 并行搜索：景点 + 餐厅 + 茶歇 ──
-  const attractionTool = toolRegistry.get("search_attractions");
-  const restaurantTool = toolRegistry.get("search_restaurants");
-  const breakTool = toolRegistry.get("search_break_places");
-
-  if (!attractionTool || !restaurantTool || !breakTool) {
+  // Invariant: destination center overrides the resolved user environment location.
+  const searchOrigin = resolvedSearchArea?.center ?? resolvedEnvironmentLocation;
+  const placeTool = toolRegistry.get("search_places");
+  if (!placeTool) {
     return {
       ...state,
       stage: "candidate_generation",
@@ -192,74 +206,73 @@ export async function stage3_generateCandidates(
   }
 
   // 分级兜底：候选不足时自动扩检索半径（L1）
-  const attEsc = await withRadiusEscalation(
-    {
-      crowdTags: getCrowdTagsForScenario(group.scenario, group.leadRole),
-      timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
-      ...providerScope,
-    },
-    async (inp): Promise<Attraction[]> => {
-      const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Attraction[]>("search_attractions", inp) : attractionTool.execute(inp));
-      return r.status === "error" ? [] : r.data;
-    },
-    { minCount: 2 }
-  );
+  const spatial = { origin: searchOrigin, maxKm: searchRadiusKm };
+  const primaryRequest: PlaceSearchRequest = { spatial, intent: {
+    categories: ["attraction", "museum", "park", "gallery"],
+    preferredTags: [...getCrowdTagsForScenario(group.scenario, group.leadRole)],
+  }};
+  const searchTasks: PlaceSearchTask[] = [{ role: "primary_activity", request: primaryRequest }];
+  const attEsc = await withSpatialRadiusEscalation(primaryRequest, async (request) => {
+    const r = await (toolExecutor
+      ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", request)
+      : placeTool.execute(request));
+    return r.status === "error" ? [] : (r.data as { places: PlaceCandidate[] }).places.filter((c: PlaceCandidate) => c.detail.type === "attraction");
+  }, { minCount: 2, maxRadius: state.searchPolicy?.maxRadiusKm ?? state.constraints.distance.hardMaxKm ?? 30 });
   if (attEsc.note) planningNotes.push(`景点：${attEsc.note}`);
+  if (state.constraints.distance.hardMaxKm !== undefined
+    && attEsc.radiusUsed >= state.constraints.distance.hardMaxKm && attEsc.items.length < 2) {
+    planningNotes.push("SEARCH_RADIUS_HARD_CAP_REACHED: 景点检索已达到用户硬距离上限");
+  }
 
-  const restEsc = await withRadiusEscalation(
-    {
-      group,
-      timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
-      ...providerScope,
-      dietaryRestrictions: group.preferences.dietaryRestrictions,
-      preferredCuisine: group.preferences.preferredCuisine,
-      preferenceTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
-    },
-    async (inp): Promise<Restaurant[]> => {
-      const r = await (toolExecutor ? toolExecutor.execute<typeof inp, Restaurant[]>("search_restaurants", inp) : restaurantTool.execute(inp));
-      return r.status === "error" ? [] : r.data;
-    },
-    { minCount: 2 }
-  );
+  const mealRequest: PlaceSearchRequest = { spatial, intent: {
+    categories: ["restaurant"],
+    requiredTags: group.preferences.dietaryRestrictions.length > 0 ? ["dietary_options"] : undefined,
+    preferredTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
+    filters: group.preferences.preferredCuisine && group.preferences.preferredCuisine.length > 0 ? { cuisines: group.preferences.preferredCuisine } : undefined,
+  }};
+  searchTasks.push({ role: "meal", request: mealRequest });
+  const restEsc = await withSpatialRadiusEscalation(mealRequest, async (request) => {
+    const r = await (toolExecutor
+      ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", request)
+      : placeTool.execute(request));
+    return r.status === "error" ? [] : (r.data as { places: PlaceCandidate[] }).places.filter((c: PlaceCandidate) => c.detail.type === "restaurant");
+  }, { minCount: 2, maxRadius: state.searchPolicy?.maxRadiusKm ?? state.constraints.distance.hardMaxKm ?? 30 });
   if (restEsc.note) planningNotes.push(`餐厅：${restEsc.note}`);
+  if (state.constraints.distance.hardMaxKm !== undefined
+    && restEsc.radiusUsed >= state.constraints.distance.hardMaxKm && restEsc.items.length < 2) {
+    planningNotes.push("SEARCH_RADIUS_HARD_CAP_REACHED: 餐厅检索已达到用户硬距离上限");
+  }
 
   // 配送搜索（仅情侣场景自动附加配送，优先鲜花 > 蛋糕）
   let deliveryItems: DeliveryItem[] = [];
   if (group.scenario === "couple" && searchOrigin.city.includes("北京")) {
-    deliveryItems = filterWithinRadius(searchOrigin, DELIVERY_ITEMS, distance.maxKm);
+    deliveryItems = filterWithinRadius(searchOrigin, DELIVERY_ITEMS, searchRadiusKm);
   }
 
-  const breakInput = {
-    breakSubtype: getBreakSubtype(leadRole),
-    hasElderly: group.ageGroup.seniors > 0,
-    hasYoungChildren: group.ageGroup.youngChildren > 0,
-    distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
-    ...providerScope,
-    afterTime: timeWindow.start,
-  };
+  const restRequest: PlaceSearchRequest = { spatial, intent: {
+    categories: ["cafe", "tea_house", "bookstore", "dessert", "break"],
+    preferredTags: [
+      ...(group.ageGroup.seniors > 0 ? ["accessible"] : []),
+      ...(group.ageGroup.youngChildren > 0 ? ["kids_friendly"] : []),
+    ],
+  }};
+  searchTasks.push({ role: "rest", request: restRequest });
   const breakResult = await (toolExecutor
-    ? toolExecutor.execute<typeof breakInput, BreakPlace[]>("search_break_places", breakInput)
-    : breakTool.execute(breakInput));
+    ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", restRequest)
+    : placeTool.execute(restRequest));
 
-  let attractions: Attraction[] = attEsc.items;
-  const restaurants: Restaurant[] = restEsc.items;
-  const breaks: BreakPlace[] = breakResult.status === "error" ? [] : breakResult.data;
+  let attractions: Attraction[] = attEsc.items.map((candidate) => candidate.detail).filter((p): p is Attraction => p.type === "attraction");
+  const restaurants: Restaurant[] = restEsc.items.map((candidate) => candidate.detail).filter((p): p is Restaurant => p.type === "restaurant");
+  const breaks: BreakPlace[] = breakResult.status === "error" ? [] : (breakResult.data as { places: PlaceCandidate[] }).places.map((candidate: PlaceCandidate) => candidate.detail).filter((p): p is BreakPlace => p.type === "break");
 
   // L2 放宽过滤：景点仍为空则去掉人群标签再搜一次
   if (attractions.length === 0) {
-    const relaxedInput = {
-      crowdTags: [],
-      timeWindow,
-      distance: { maxKm: searchRadiusKm, homeLocation: searchOrigin },
-      ...providerScope,
-    };
+    const relaxedInput: PlaceSearchRequest = { spatial, intent: { categories: ["attraction", "museum", "park", "gallery"] } };
     const relaxed = await (toolExecutor
-      ? toolExecutor.execute<typeof relaxedInput, Attraction[]>("search_attractions", relaxedInput)
-      : attractionTool.execute(relaxedInput));
-    if (relaxed.status !== "error" && relaxed.data.length > 0) {
-      attractions = relaxed.data;
+      ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", relaxedInput)
+      : placeTool.execute(relaxedInput));
+    if (relaxed.status !== "error" && (relaxed.data as { places: PlaceCandidate[] }).places.length > 0) {
+      attractions = (relaxed.data as { places: PlaceCandidate[] }).places.map((c: PlaceCandidate) => c.detail).filter((p): p is Attraction => p.type === "attraction");
       planningNotes.push("景点：已放宽人群标签过滤以补足候选");
     }
   }
@@ -321,7 +334,7 @@ export async function stage3_generateCandidates(
   return {
     ...state,
     stage: "candidate_generation",
-    searchPolicy: state.searchPolicy ?? { radiusKm: searchRadiusKm },
+    searchPolicy: state.searchPolicy ?? createInitialSearchPolicy(state.constraints),
     resolvedSearchArea,
     planRevision: state.planRevision ?? 0,
     candidates,
@@ -411,7 +424,12 @@ export async function stage4_feasibilityCheck(
 
 export async function stage5_selectBest(
   state: PlanningState,
-  opts?: { date?: Date; weather?: import("../../spec/decision.js").WeatherCondition; weightOverride?: Partial<import("../../spec/decision.js").ScoringWeights> }
+  opts?: {
+    date?: Date;
+    weather?: import("../../spec/decision.js").WeatherCondition;
+    weightOverride?: Partial<import("../../spec/decision.js").ScoringWeights>;
+    environmentLocation?: ResolvedLocation;
+  }
 ): Promise<PlanningState> {
   if (!state.candidates || state.candidates.length === 0) {
     return {
@@ -427,6 +445,7 @@ export async function stage5_selectBest(
     weather: opts?.weather,
     weightOverride: opts?.weightOverride,
     notes: state.planningNotes,
+    environmentLocation: opts?.environmentLocation,
   });
 
   if (!decision) {

@@ -3,6 +3,7 @@
 // ============================================================
 
 import type { Attraction, BreakPlace, BreakSubtype, GeoLocation, LocalFeatureTag, Restaurant } from "./types.js";
+import type { PlaceSearchRequest, PlaceSearchResult } from "./place-search.js";
 
 export const ACTIVITY_DATA_PROVIDER_API_VERSION = 1 as const;
 
@@ -23,6 +24,8 @@ export interface SearchArea {
 }
 
 export interface ProviderCapabilities {
+  /** Generic open-category place search. */
+  places: boolean;
   destinationResolution: boolean;
   attractions: boolean;
   restaurants: boolean;
@@ -31,7 +34,7 @@ export interface ProviderCapabilities {
   lookupById: boolean;
 }
 
-export interface ProviderContext { signal?: AbortSignal; requestId?: string }
+export interface ProviderContext { signal?: AbortSignal; requestId?: string; city?: string }
 
 export type DataProviderErrorCode = "destination_unsupported" | "invalid_response"
   | "authentication_failed" | "rate_limited" | "network_unavailable" | "capability_unsupported";
@@ -71,6 +74,7 @@ export interface ActivityDataProviderV1 {
   readonly name: string;
   readonly capabilities: ProviderCapabilities;
   resolveDestination(query: DestinationQuery, context?: ProviderContext): Promise<SearchArea>;
+  searchPlaces(request: PlaceSearchRequest, context?: ProviderContext): Promise<PlaceSearchResult>;
   searchAttractions(query: PlaceQuery, context?: ProviderContext): Promise<Attraction[]>;
   searchRestaurants(query: PlaceQuery, context?: ProviderContext): Promise<Restaurant[]>;
   searchBreakPlaces(query: BreakPlaceQuery, context?: ProviderContext): Promise<BreakPlace[]>;

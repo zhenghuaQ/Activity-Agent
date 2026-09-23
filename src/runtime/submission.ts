@@ -7,6 +7,7 @@
 
 import {
   newAgentId,
+  type AgentRunContextInput,
   type AgentRunInput,
   type RunId,
   type SessionId,
@@ -21,7 +22,18 @@ export interface AgentInput {
   id: InputId;
   content: string;
   config?: Record<string, unknown>;
+  /** 调用方提供的环境事实提示，不与运行配置混用。 */
+  context?: AgentRunContextInput;
   createdAt: number;
+}
+
+/**
+ * 新调用可显式区分 config/context；保留 Record 形态兼容既有调用方。
+ * 仅包含 location 的对象也支持作为 context 简写。
+ */
+export interface AgentInputOptions {
+  config?: Record<string, unknown>;
+  context?: AgentRunContextInput;
 }
 
 export type SubmissionOp =
@@ -63,12 +75,42 @@ export interface SubmissionResult {
 
 export function createAgentInput(
   content: string,
-  config?: Record<string, unknown>,
+  configOrOptions?: Record<string, unknown> | AgentInputOptions,
+  context?: AgentRunContextInput,
 ): AgentInput {
+  let config: Record<string, unknown> | undefined;
+  let resolvedContext = context;
+
+  if (configOrOptions) {
+    const candidate = configOrOptions as Record<string, unknown>;
+    const hasContext = "context" in candidate;
+    const hasNestedConfig = "config" in candidate;
+    const hasLocation = "location" in candidate;
+
+    if (hasContext || hasNestedConfig || hasLocation) {
+      const {
+        context: nestedContext,
+        config: nestedConfig,
+        location,
+        ...legacyConfig
+      } = candidate;
+      config = {
+        ...legacyConfig,
+        ...(nestedConfig && typeof nestedConfig === "object" ? nestedConfig : {}),
+      };
+      if (Object.keys(config).length === 0) config = undefined;
+      resolvedContext = (nestedContext as AgentRunContextInput | undefined)
+        ?? (hasLocation ? { location: location as AgentRunContextInput["location"] } : resolvedContext);
+    } else {
+      config = configOrOptions as Record<string, unknown>;
+    }
+  }
+
   return {
     id: newAgentId("input"),
     content,
     ...(config ? { config } : {}),
+    ...(resolvedContext ? { context: resolvedContext } : {}),
     createdAt: Date.now(),
   };
 }
@@ -89,7 +131,7 @@ export function createSubmission(
       ? createAgentInput(input)
       : "id" in input
         ? input
-        : createAgentInput(input.rawText, input.config);
+        : createAgentInput(input.rawText, input.config, input.context);
 
   return {
     id: newAgentId("submission"),
@@ -108,5 +150,6 @@ export function toAgentRunInput(input: AgentInput): AgentRunInput {
   return {
     rawText: input.content,
     config: input.config,
+    context: input.context,
   };
 }

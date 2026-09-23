@@ -15,7 +15,6 @@ import type {
   TimeWindow,
   UserPreferences,
 } from "../../spec/types.js";
-import { HOME } from "../data/mock.js";
 import { extractDestination, extractPreferredCuisine } from "../conversation/memory.js";
 
 /**
@@ -106,10 +105,7 @@ export function parseIntent(rawText: string): StructuredConstraints {
   const timeWindow = extractTimeWindow(lower);
 
   // ─── 距离约束 ─────────────────────────────────
-  const distance: DistanceConstraint = {
-    maxKm: lower.includes("不远") || lower.includes("附近") || lower.includes("就近") ? 15 : 25,
-    homeLocation: { ...HOME },
-  };
+  const distance = extractDistanceConstraint(lower);
 
   // ─── 额外提示 ────────────────────────────────
   const extraHints: string[] = [];
@@ -231,4 +227,42 @@ function extractTimeWindow(text: string): TimeWindow {
   const end = `${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`;
 
   return { start, end, durationHours: adjustedDuration };
+}
+
+function extractDistanceConstraint(text: string): DistanceConstraint {
+  const matches = [...text.matchAll(/(\d+(?:\.\d+)?|[一二两三四五六七八九十百]+)\s*(?:公里|千米|km)/gi)]
+    .map((match) => ({ value: parseDistanceNumber(match[1]), index: match.index ?? 0 }));
+  const nearby = text.includes("不远") || text.includes("附近") || text.includes("就近") || text.includes("近一点");
+  if (matches.length > 0 && matches.every((match) => Number.isFinite(match.value))) {
+    const hard = /(以内|不超过|最多|最远|不要超过|不能超过)/.test(text);
+    const soft = /(左右|最好|尽量|附近|不远|就近|近一点)/.test(text);
+    if (hard && soft && matches.length >= 2) {
+      const hardCue = [...text.matchAll(/以内|不超过|最多|最远|不要超过|不能超过/g)]
+        .map((match) => match.index ?? 0);
+      const softCue = [...text.matchAll(/左右|最好|尽量|附近|不远|就近|近一点/g)]
+        .map((match) => match.index ?? 0);
+      const nearest = (cue: number[]) => matches.reduce((best, candidate) => {
+        const bestDistance = Math.min(...cue.map((index) => Math.abs(index - best.index)));
+        const candidateDistance = Math.min(...cue.map((index) => Math.abs(index - candidate.index)));
+        return candidateDistance < bestDistance ? candidate : best;
+      });
+      const hardMatch = nearest(hardCue);
+      const softMatch = nearest(softCue);
+      if (hardMatch.index !== softMatch.index) {
+        return { hardMaxKm: hardMatch.value, preferredMaxKm: softMatch.value };
+      }
+    }
+    if (hard || !soft) return { hardMaxKm: matches[0].value };
+    return { preferredMaxKm: matches[0].value };
+  }
+  return nearby ? { preferredMaxKm: 15 } : {};
+}
+
+function parseDistanceNumber(value: string): number {
+  if (/^\d/.test(value)) return Number(value);
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (value === "十") return 10;
+  if (value.endsWith("十")) return (digits[value[0]] ?? 1) * 10;
+  if (value.startsWith("十")) return 10 + (digits[value[1]] ?? 0);
+  return Number(value.split("").reduce((sum, char) => sum * 10 + (digits[char] ?? 0), 0));
 }

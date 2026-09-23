@@ -14,8 +14,6 @@ import { ProfileStore } from "../src/profile/store.js";
 import { runFullPipeline } from "../src/planner/engine.js";
 import { parseIntent } from "../src/intent/parser.js";
 
-const HOME = { lat: 39.995, lng: 116.47, address: "望京", city: "北京" };
-
 function baseConstraints(overrides?: Partial<StructuredConstraints>): StructuredConstraints {
   return {
     group: {
@@ -40,7 +38,7 @@ function baseConstraints(overrides?: Partial<StructuredConstraints>): Structured
       },
     },
     timeWindow: { start: "14:00", end: "18:00", durationHours: 4 },
-    distance: { maxKm: 25, homeLocation: HOME },
+    distance: { hardMaxKm: 25 },
     extraHints: [],
     ...overrides,
   };
@@ -106,7 +104,7 @@ describe("applyProfileToConstraints 偏好合并", () => {
     });
     const merged = applyProfileToConstraints(c, p);
     expect(merged.group.preferences.budget).toBe("low");
-    expect(merged.distance.maxKm).toBe(8);
+    expect(merged.distance.preferredMaxKm).toBe(8);
     expect(merged.group.preferences.preferredCuisine).toEqual(["云南菜"]);
   });
 
@@ -117,18 +115,18 @@ describe("applyProfileToConstraints 偏好合并", () => {
       c,
       createProfile({ id: "s", segment: "comfort_senior" })
     );
-    expect(senior.distance.maxKm).toBe(10);
+    expect(senior.distance.preferredMaxKm).toBe(10);
 
     // 请求已比默认更近时保持请求值（不放大）
     const near = applyProfileToConstraints(
-      baseConstraints({ distance: { maxKm: 6, homeLocation: HOME } }),
+      baseConstraints({ distance: { hardMaxKm: 6 } }),
       createProfile({ id: "s2", segment: "comfort_senior" })
     );
-    expect(near.distance.maxKm).toBe(6);
+    expect(near.distance.hardMaxKm).toBe(6);
 
     // 无距离默认的分层（均衡）保持请求值
     const bal = applyProfileToConstraints(c, createProfile({ id: "b", segment: "balanced" }));
-    expect(bal.distance.maxKm).toBe(25);
+    expect(bal.distance.hardMaxKm).toBe(25);
   });
 
   it("忌口做并集", () => {

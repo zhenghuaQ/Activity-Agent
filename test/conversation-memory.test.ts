@@ -8,6 +8,7 @@ import { ConversationStore } from "../src/conversation/store.js";
 import { parseIntent } from "../src/intent/parser.js";
 import { decisionFixture } from "./fixtures/decision.js";
 import { SearchRestaurantsTool } from "../src/tools/restaurants.js";
+import { HOME } from "../src/data/mock.js";
 
 const temporaryFiles: string[] = [];
 
@@ -16,6 +17,14 @@ afterEach(async () => {
 });
 
 describe("conversation short-term memory", () => {
+  it("只保留用户约束，不保留 Runtime 位置事实", () => {
+    const first = parseIntent("这周末附近出去玩");
+    const second = mergeTurnConstraints(first, parseIntent("想吃日料"), "想吃日料");
+    expect(second.distance).toEqual({ preferredMaxKm: 15 });
+    expect(second).not.toHaveProperty("homeLocation");
+    expect(JSON.stringify(second)).not.toContain("望京");
+  });
+
   it("retains earlier constraints and applies later corrections", () => {
     let memory = parseIntent("我这周末想去上海玩，帮我制定一个计划");
     memory = mergeTurnConstraints(memory, parseIntent("我选美食约会"), "我选美食约会");
@@ -71,11 +80,12 @@ describe("conversation short-term memory", () => {
     const constraints = parseIntent("和女朋友约会，想吃火锅");
     const restaurants = await new SearchRestaurantsTool().run({ group: constraints.group,
       timeWindow: constraints.timeWindow, distance: constraints.distance,
+      origin: HOME,
       preferredCuisine: constraints.group.preferences.preferredCuisine });
     expect(restaurants[0].cuisine).toContain("火锅");
 
     const unavailable = await new SearchRestaurantsTool().run({ group: constraints.group,
-      timeWindow: constraints.timeWindow, distance: constraints.distance, preferredCuisine: ["日料"] });
+      timeWindow: constraints.timeWindow, distance: constraints.distance, origin: HOME, preferredCuisine: ["日料"] });
     expect(unavailable.length).toBeGreaterThan(0);
   });
 });

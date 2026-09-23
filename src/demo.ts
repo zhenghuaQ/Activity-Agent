@@ -26,6 +26,8 @@ import type {
   PlanningState,
   Restaurant,
 } from "../spec/types.js";
+import type { PlanningEnvironment } from "./planner/stages.js";
+import { HOME } from "./data/mock.js";
 import { LeadRoleStrategy } from "../spec/types.js";
 import { DimensionLabel, ObjectiveLabel } from "../spec/decision.js";
 import type { UserProfile } from "../spec/profile.js";
@@ -39,6 +41,11 @@ import {
 
 /** 本次会话选定的用户画像（个性化） */
 let activeProfile: UserProfile | null = null;
+
+// Demo 直接调用业务 Stage，因此显式提供 Runtime 已解析的默认环境事实。
+const demoEnvironment: PlanningEnvironment = {
+  userLocation: { location: { ...HOME }, source: "default" },
+};
 
 // ─── 交互工具 ────────────────────────────────────────
 
@@ -153,7 +160,7 @@ async function round1_parseIntent(state: PlanningState): Promise<PlanningState> 
   console.log(`\n  🤖 我理解：${strategy.description}`);
   step("👥", `${c.group.totalPeople}人 | ${strategy.label}`);
   step("⏰", `${c.timeWindow.start}→${c.timeWindow.end}，约${c.timeWindow.durationHours}h`);
-  step("📍", `${c.distance.homeLocation.address} 周边 ≤${c.distance.maxKm}km`);
+  step("📍", `${demoEnvironment.userLocation.location.address} 周边检索半径 ${state.searchPolicy?.radiusKm ?? "默认"}km`);
 
   if (c.group.preferences.dieting) step("🥗", "有人正在减肥，注意饮食");
   if (c.group.preferences.dietaryRestrictions.length > 0)
@@ -243,10 +250,11 @@ function buildPatches(
 async function round3_showAndTune(state: PlanningState): Promise<PlanningState> {
   stage("🔍 Round 3: 正在搜索和编排...");
 
-  state = await stage3_generateCandidates(state);
+  state = await stage3_generateCandidates(state, undefined, demoEnvironment);
   state = await stage4_feasibilityCheck(state);
   state = await stage5_selectBest(state, {
     weightOverride: activeProfile ? resolveWeights(activeProfile) : undefined,
+    environmentLocation: demoEnvironment.userLocation,
   });
 
   if (!state.selectedPlan) {

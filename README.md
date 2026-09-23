@@ -65,7 +65,7 @@ ai-activity-agent/
 │   └── src/pages/         # 决策页 / 监控面板 / 画像管理
 ├── scripts/
 │   └── start.mjs          # 一键启动脚本（跨平台）
-├── eval/                  # Harness Engineering（场景用例 + 评估）
+├── eval/                  # Decision Eval V3 + Runtime Regression
 ├── test/                  # 单元与 Runtime 集成测试
 ├── DESIGN.md              # 详细设计文档
 └── package.json
@@ -113,7 +113,13 @@ npm run dev:web            # 或用 concurrently 一键并行前后端
 # 方式三：CLI 交互式 Demo（终端输入自然语言，获取出行方案）
 npm run demo
 
-# 运行评估套件（单轮对照 + 多轮完整任务 + 统计区间）
+# 主评测：Decision Agent Evaluation V3（当前为过渡版）
+npm run eval:decision
+
+# 工程辅助评测：5-stage baseline vs AgentRuntime
+npm run eval:runtime
+
+# 兼容入口：先 Decision，再 Runtime Regression
 npm run eval
 ```
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CONVERSATION_CASES } from "../eval/conversation-cases.js";
-import { runConversationCase } from "../eval/conversation.js";
+import { CONVERSATION_CASES } from "../eval/decision/scenarios/conversation-cases.js";
+import { runConversationCase } from "../eval/decision/evaluators/conversation.js";
 
 describe("multi-turn task evaluation", () => {
   it("memory reduces errors on a representative complete task", async () => {

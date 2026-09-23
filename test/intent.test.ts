@@ -19,4 +19,12 @@ describe("意图解析 - 场景与角色", () => {
     expect(c.group.leadRole).toBe("kids");
     expect(c.group.ageGroup.youngChildren).toBeGreaterThan(0);
   });
+
+  it("只解析距离约束，不凭空制造当前位置", () => {
+    const c = parseIntent("下午出去玩，附近一点");
+    expect(c.distance.preferredMaxKm).toBe(15);
+    expect(c.distance).not.toHaveProperty("homeLocation");
+    expect(JSON.stringify(c)).not.toContain("lat");
+    expect(JSON.stringify(c)).not.toContain("lng");
+  });
 });

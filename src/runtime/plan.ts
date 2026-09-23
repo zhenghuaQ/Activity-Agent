@@ -13,12 +13,12 @@
 // 计算，为下一阶段真正的受限并发执行做好基础。
 // ============================================================
 
-export type RuntimeStepType =
-  | "intent_parsing"
-  | "follow_up_questions"
-  | "candidate_generation"
-  | "feasibility_check"
-  | "fine_scheduling";
+import type { PlanningStage } from "../../spec/types.js";
+
+/** Runtime 编排专用步骤，不属于 Activity 领域 PlanningStage。 */
+export type RuntimeSystemStep = "context_resolution";
+
+export type RuntimeStepType = RuntimeSystemStep | PlanningStage;
 
 export interface RuntimePlanStep {
   id: string;
@@ -175,8 +175,15 @@ export function createActivityRuntimePlan(): RuntimePlan {
     id: "activity-default-v1",
     steps: [
       {
+        id: "context_resolution",
+        type: "context_resolution",
+        dependsOn: [],
+        writes: ["environment.location"],
+      },
+      {
         id: "intent_parsing",
         type: "intent_parsing",
+        dependsOn: [],
         writes: ["planning.intent"],
       },
       {
@@ -189,8 +196,8 @@ export function createActivityRuntimePlan(): RuntimePlan {
       {
         id: "candidate_generation",
         type: "candidate_generation",
-        dependsOn: ["follow_up_questions"],
-        reads: ["planning.intent", "planning.follow_up"],
+        dependsOn: ["context_resolution", "follow_up_questions"],
+        reads: ["planning.intent", "planning.follow_up", "environment.location"],
         writes: ["planning.candidates"],
       },
       {

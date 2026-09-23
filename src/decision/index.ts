@@ -6,6 +6,7 @@
 // ============================================================
 
 import type { PlanCandidate, StructuredConstraints } from "../../spec/types.js";
+import type { ResolvedLocation } from "../../spec/location.js";
 import type {
   DecisionResult,
   ScoringWeights,
@@ -28,6 +29,8 @@ export interface RunDecisionOptions {
   weightOverride?: Partial<ScoringWeights>;
   /** 额外的过程说明（如上游兜底） */
   notes?: string[];
+  /** Runtime 已解析的环境位置，用于情境（如天气）计算。 */
+  environmentLocation?: ResolvedLocation;
 }
 
 /**
@@ -44,6 +47,7 @@ export async function runDecision(
   const context = await buildContext(constraints, {
     date: opts.date,
     weather: opts.weather,
+    environmentLocation: opts.environmentLocation,
   });
 
   const base: ScoringWeights = { ...DEFAULT_WEIGHTS, ...(opts.weightOverride ?? {}) };
@@ -74,4 +78,4 @@ export { scorePlan } from "./score.js";
 export { buildContext, adjustWeights } from "./context.js";
 export { buildPareto } from "./pareto.js";
 export { explainPlan, compareAgainst } from "./explain.js";
-export { withRadiusEscalation } from "./fallback.js";
+export { withRadiusEscalation, withSpatialRadiusEscalation } from "./fallback.js";

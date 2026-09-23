@@ -8,6 +8,7 @@
 // ============================================================
 
 import type { StructuredConstraints } from "../../spec/types.js";
+import type { ResolvedLocation } from "../../spec/location.js";
 import type {
   DecisionContext,
   ScoringWeights,
@@ -61,6 +62,8 @@ export interface BuildContextOptions {
   date?: Date;
   /** 显式覆盖天气（测试/无网用） */
   weather?: WeatherCondition;
+  /** Runtime 已解析的环境位置；不从 StructuredConstraints 读取。 */
+  environmentLocation?: ResolvedLocation;
 }
 
 /** 构建决策情境。会尝试拉取天气（可被 opts.weather 覆盖）。 */
@@ -70,7 +73,7 @@ export async function buildContext(
 ): Promise<DecisionContext> {
   const date = opts.date ?? new Date();
   const weather =
-    opts.weather ?? (await fetchWeather(constraints.distance.homeLocation.city));
+    opts.weather ?? (await fetchWeather(opts.environmentLocation?.location.city ?? ""));
   const departureHour = Math.floor(
     timeToMinutes(constraints.timeWindow.start) / 60
   );

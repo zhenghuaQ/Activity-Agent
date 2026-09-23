@@ -9,7 +9,6 @@ import type {
   Scenario,
 } from "../../spec/types.js";
 import { getLLMClient, getLLMConfig } from "./config.js";
-import { HOME } from "../data/mock.js";
 import { parseIntent as mockParse } from "../intent/parser.js";
 import { childLogger } from "../core/logger.js";
 import { throwIfAborted } from "../runtime/abort.js";
@@ -88,11 +87,17 @@ const INTENT_SCHEMA = {
         maximum: 12,
         description: "活动时长（小时）",
       },
-      maxDistanceKm: {
+      hardMaxDistanceKm: {
         type: "number",
         minimum: 1,
         maximum: 50,
-        description: "最大距离约束（公里）",
+        description: "仅当用户明确表达不可超过时填写的硬距离上限（公里）",
+      },
+      preferredMaxDistanceKm: {
+        type: "number",
+        minimum: 1,
+        maximum: 50,
+        description: "用户偏好的距离范围（公里），不是不可违反的硬约束",
       },
       extraHints: {
         type: "array",
@@ -121,7 +126,8 @@ interface LLMIntentResult {
   budget?: "low" | "medium" | "high";
   startTime: string;
   durationHours: number;
-  maxDistanceKm: number;
+  hardMaxDistanceKm?: number;
+  preferredMaxDistanceKm?: number;
   extraHints: string[];
 }
 
@@ -151,7 +157,9 @@ export async function parseIntentWithLLM(
           content: `你是AI出行决策助手的意图解析模块。从用户输入中提取结构化约束。
 规则：
 - 默认下午出发(startTime="14:00")，默认5小时(durationHours=5)
-- 默认距离25km，用户说"附近"/"不远"则为15km
+- 没有距离需求时不要填写 hardMaxDistanceKm 或 preferredMaxDistanceKm
+- hardMaxDistanceKm 只用于“5公里以内/不超过5公里/最多5公里”等明确硬上限
+- preferredMaxDistanceKm 用于“最好5公里左右/尽量近/附近”等软偏好
 - 用户明确说去某个城市时写入 destinationCity；未说明目的地时留空，不要把当前位置当作目的地
 - couple 场景默认2人，solo 默认1人，其余默认3人
 - "女朋友"/"老婆"/"约会" → scenario=couple, leadRole=partner
@@ -248,8 +256,8 @@ function llmResultToConstraints(r: LLMIntentResult): StructuredConstraints {
       durationHours,
     },
     distance: {
-      maxKm: clampNum(r.maxDistanceKm, 1, 50, 25),
-      homeLocation: { ...HOME },
+      ...(r.hardMaxDistanceKm !== undefined ? { hardMaxKm: clampNum(r.hardMaxDistanceKm, 1, 50, 25) } : {}),
+      ...(r.preferredMaxDistanceKm !== undefined ? { preferredMaxKm: clampNum(r.preferredMaxDistanceKm, 1, 50, 25) } : {}),
     },
     extraHints: r.extraHints || [],
   };

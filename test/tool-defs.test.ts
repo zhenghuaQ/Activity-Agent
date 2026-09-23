@@ -30,7 +30,7 @@ describe("工具 LLM 定义（Claude Code 式工具接口）", () => {
 
   test("registry.llmDefinitions() 输出 OpenAI 兼容的 function tool 格式", () => {
     const defs = toolRegistry.llmDefinitions();
-    expect(defs).toHaveLength(9);
+    expect(defs).toHaveLength(10);
 
     for (const def of defs) {
       expect(def.type).toBe("function");
@@ -49,11 +49,13 @@ describe("工具 LLM 定义（Claude Code 式工具接口）", () => {
       "crowdTags",
       "timeWindow",
       "distance",
+      "origin",
     ]);
     expect(TOOL_DEFS.search_restaurants.inputSchema.required).toEqual([
       "group",
       "timeWindow",
       "distance",
+      "origin",
     ]);
     expect(TOOL_DEFS.check_restaurant_availability.inputSchema.required).toEqual([
       "restaurantId",

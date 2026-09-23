@@ -34,19 +34,27 @@ function configuredProviderId(): string {
   return getAppConfig().flags.amap && process.env.AMAP_API_KEY ? "amap" : "mock";
 }
 
+/**
+ * Creates one provider instance at application composition time.
+ * This is the preferred API for isolated Runtime/ToolRegistry instances.
+ */
+export function createDefaultDataProvider(): ActivityDataProviderV1 {
+  const id = configuredProviderId();
+  const provider = registry.create(id);
+  log.info({ providerId: provider.id, apiVersion: provider.apiVersion }, "地点数据 Provider 已创建");
+  return provider;
+}
+
+/** @deprecated Legacy process-global provider API. Prefer explicit injection. */
 export function getDataProvider(): ActivityDataProviderV1 {
-  if (!active) {
-    const id = configuredProviderId();
-    active = registry.create(id);
-    log.info({ providerId: active.id, apiVersion: active.apiVersion }, "地点数据 Provider 已启用");
-  }
+  if (!active) active = createDefaultDataProvider();
   return active;
 }
 
 /** @deprecated 使用 getDataProvider。 */
 export const getDataSource = getDataProvider;
 
-/** 社区接入点：在首次 getDataProvider() 前注册工厂，并设置 ACTIVITY_DATA_PROVIDER。 */
+/** 社区接入点：在首次 getDataProvider() 或 createDefaultDataProvider() 前注册工厂。 */
 export function registerDataProvider(id: string, factory: DataProviderFactory,
   options: { replace?: boolean } = {}): void {
   registry.register(id, factory, options);
@@ -54,8 +62,9 @@ export function registerDataProvider(id: string, factory: DataProviderFactory,
 
 export function listDataProviders(): string[] { return registry.list(); }
 
-/** 测试或宿主应用显式注入；不从环境加载任意代码。 */
+/** @deprecated Legacy process-global provider API. Prefer createToolRegistry({ dataProvider }). */
 export function setDataProvider(provider: ActivityDataProviderV1): void { active = provider; }
+/** @deprecated Legacy process-global provider API. */
 export function resetDataSource(): void { active = null; }
 
 export { MockProvider } from "./providers/mock-provider.js";
