@@ -3,13 +3,13 @@
 **AI Activity Decision Agent** — 通过可持续补充的多轮对话，决策出合适的出行方案（景点 + 茶歇 + 餐厅）
 
 > **产品定位：核心竞争力是「一键决策」**——多维评分 + 可解释 + 个性化推荐。
-> 系统**不做下单、预订、取号、支付、配送下单**等交易/履约动作；决策完成后，用户自行在对应平台预订即可。
+> 系统只生成决策方案，不执行下单、预订、取号、支付或配送等交易与履约动作；用户可自行在对应平台预订。
 
 ---
 
 ## 项目简介
 
-基于 **LLM + 多 Tool 协同** 的本地短时活动智能**决策** Agent。用户只需用自然语言描述出行需求，系统即可自动完成意图解析、用户画像推理、候选方案生成、可行性校验及精细时间线编排，最终**一键决策**出包含景点、茶歇、餐厅的最优出行方案。
+基于 **LLM + 多 Tool 协同** 的本地短时活动智能**决策** Agent。用户只需用自然语言描述出行需求，系统即可自动完成上下文解析、用户画像推理、候选方案生成、硬约束校验、偏好评分及时间线编排，最终**一键决策**出包含景点、茶歇、餐厅的可解释出行方案。系统支持多轮追问、会话记忆、方案补充和重规划。
 
 **示例输入：**
 
@@ -29,46 +29,63 @@
 
 - **5 阶段分层递进式决策** — 意图解析 → 追问确认 → 候选生成 → 可行性校验 → 精细编排（决策输出）
 - **LeadRole 用户画像体系** — 6 种主导角色（带娃/陪老人/全家/情侣/朋友/独自），自动推理茶歇偏好与忌口
-- **拥堵惩罚模型** — 以绝对耗时为核心排序依据（非拥堵等级），拥堵仅用于可视化展示
+- **硬约束与偏好分层** — 先校验可行性、完整性和饮食限制，再按距离、时间、人群适配等偏好评分
+- **可解释决策** — 多目标 Pareto 候选、评分证据、决策轨迹和取舍说明
+- **Runtime 事件架构** — 生命周期状态机、DAG 执行计划、事件总线和 SSE Subscriber 解耦
 - **LLM + 降级双保险** — OpenAI function calling 做意图解析，失败自动降级为 Mock 关键词匹配
 - **开放地点数据 Provider** — 支持内置 Mock/高德、社区 TypeScript Provider 和语言无关 HTTP Provider
 - **真正的多轮规划** — 自由文本补充与选择题追问并存，后续输入只覆盖明确修改的条件
 - **会话级短期记忆** — 对话、约束和方案版本持久化，关闭页面后可恢复并继续补充
-- **统计化 Eval** — 完整多轮任务达标率为主指标，记忆错误与硬约束违规独立报告，时延按任务做 Bootstrap
+- **统计化 Eval** — Decision Agent 评测与 Runtime 回归分离，完整多轮任务达标率为主指标
 
-## 项目结构
+## 项目架构
+
+```text
+Web / CLI / HTTP 客户端
+        │ ChannelRequest / ChannelResponse / SSE
+        ▼
+Channel Adapter（Fastify）
+        │
+        ▼
+AgentRuntime（Session、Submission、Run 生命周期、取消与重规划）
+        ├── Runtime Plan / Executor（按依赖推进规划步骤）
+        ├── AgentEventBus ── SSE / 日志 / 会话记忆 Subscribers
+        └── ActivityPlanner（活动领域编排）
+              ├── 意图解析与画像 / 追问
+              ├── 地点、景点、茶歇、餐厅与通勤 Tools
+              ├── 候选组合、硬约束校验、偏好评分与 Pareto 决策
+              └── 时间线、解释、决策轨迹与最终方案
+        │
+        ├── LLM Provider（不可用时意图解析可降级到 Mock）
+        ├── Activity Data Provider（Mock / 高德 / HTTP / TypeScript 扩展）
+        └── Conversation Store（本地 JSON 会话记忆）
+```
+
+HTTP 层负责协议、SSE、限流和指标；业务请求先转换成协议无关的 Channel 契约，再进入 `AgentRuntime`。同一 Session 的提交由 mailbox 串行化为 Turn。Runtime 产生带 Run/Session/Trace 关联信息的 `AgentEvent v1`，EventBus 将事件分发给 SSE、结构化日志和会话记忆 Subscriber；传输层与副作用不放进 Planner。
+
+`ActivityPlanner` 负责活动方案的领域决策。Runtime Plan 描述执行步骤及依赖关系，与用户看到的活动 Plan（景点、茶歇、餐厅时间线）是不同概念；执行器当前按依赖串行推进，DAG 资源读写契约为后续受限并发留出边界。重规划调整搜索策略，不修改用户原始硬约束。
+
+## 主要目录
 
 ```
-ai-activity-agent/
-├── spec/                  # SDD 契约层
-│   ├── types.ts           # 核心类型定义
-│   ├── tools.ts           # 8个决策Tool的输入输出签名
-│   ├── constraints.ts     # 约束检查 + 可行性评分
-│   ├── decision.ts        # 决策契约（帕累托/评分/可解释）
-│   ├── profile.ts         # 画像契约
-│   └── transit.ts         # 交通模型（拥堵/路线/惩罚分）
+Activity-Agent/
+├── spec/                  # Agent、Runtime、Channel、事件、规划及支付契约
 ├── src/
-│   ├── core/              # 配置/日志/缓存/地理工具
-│   ├── data/              # Provider Registry、Mock/高德/HTTP Provider 与合规测试工具
-│   ├── intent/            # 意图解析（Mock关键词匹配）
-│   ├── llm/               # LLM集成（OpenAI function calling）
-│   ├── profile/           # 用户画像 + 分层 + 存储
-│   ├── conversation/      # 多轮会话、短期记忆、事件投影与 JSON 存储
-│   ├── decision/          # 多维评分 + 帕累托 + 可解释
-│   ├── planner/
-│   │   ├── engine.ts      # 5阶段一键决策引擎（SSE 流式）
-│   │   └── scheduler.ts   # 时间线编排器
-│   ├── server/            # Fastify 后端（API/SSE/指标/降级开关/OpenAPI）
-│   ├── tools/             # Tool 实现层（仅决策相关，无下单/预订）
-│   └── demo.ts            # CLI 交互式 Demo
-├── web/                   # 前端看板（Vite + React + TS + Recharts）
-│   └── src/pages/         # 决策页 / 监控面板 / 画像管理
-├── scripts/
-│   └── start.mjs          # 一键启动脚本（跨平台）
-├── eval/                  # Decision Eval V3 + Runtime Regression
-├── test/                  # 单元与 Runtime 集成测试
-├── DESIGN.md              # 详细设计文档
-└── package.json
+│   ├── runtime/           # Session/Run、DAG Plan、Executor、事件总线、重规划
+│   ├── planner/           # ActivityPlanner、阶段编排、候选组合与时间线
+│   ├── decision/          # 可行性、约束、评分、Pareto、解释、决策轨迹
+│   ├── tools/             # 地点/活动/餐饮/通勤等领域工具与注册表
+│   ├── data/              # Provider Registry、Mock/高德/HTTP 地点数据
+│   ├── intent/ llm/       # 意图解析、LLM 适配与追问生成
+│   ├── profile/           # 用户画像、分层和画像存储
+│   ├── conversation/      # 会话记忆、事件投影和 JSON 存储
+│   ├── server/            # Fastify Channel、REST/SSE、指标和 OpenAPI
+│   └── constraints/       # 饮食兼容性与方案完整性规则
+├── web/                   # Vite + React 前端决策与监控看板
+├── eval/                  # Decision Eval 与 Runtime Regression
+├── docs/                  # AgentEvent、Provider、Location 契约与设计说明
+├── test/                  # Vitest 单元和集成测试
+└── scripts/               # 跨平台启动脚本
 ```
 
 ## 快速开始
@@ -81,8 +98,8 @@ ai-activity-agent/
 ### 安装
 
 ```bash
-git clone https://github.com/zhenghuaQ/meituan-activity-agent.git
-cd ai-activity-agent
+git clone https://github.com/zhenghuaQ/Activity-Agent.git
+cd Activity-Agent
 npm install
 ```
 
@@ -113,13 +130,11 @@ npm run dev:web            # 或用 concurrently 一键并行前后端
 # 方式三：CLI 交互式 Demo（终端输入自然语言，获取出行方案）
 npm run demo
 
-# 主评测：Decision Agent Evaluation V3（当前为过渡版）
+# Decision 评测与 Runtime 回归
 npm run eval:decision
-
-# 工程辅助评测：5-stage baseline vs AgentRuntime
 npm run eval:runtime
 
-# 兼容入口：先 Decision，再 Runtime Regression
+# 汇总兼容入口：Decision + Runtime Regression
 npm run eval
 ```
 
