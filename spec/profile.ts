@@ -7,6 +7,7 @@
 // ============================================================
 
 import type { ScoringWeights } from "./decision.js";
+import type { DietaryRequirement } from "./dietary.js";
 
 // ─── 用户分层 ──────────────────────────────────────────
 
@@ -41,7 +42,7 @@ export interface UserPreferenceOverride {
   weights?: Partial<ScoringWeights>;
   budget?: "low" | "medium" | "high";
   maxDistanceKm?: number;
-  dietaryRestrictions?: string[];
+  dietaryRestrictions?: DietaryRequirement[];
   preferredCuisine?: string[];
 }
 

@@ -43,6 +43,8 @@ export interface PipelineOptions {
   signal?: AbortSignal;
   /** Optional per-runtime Tool registry, including injected LocationResolver. */
   toolRegistry?: ToolRegistryLike;
+  /** Capture an internal, read-only decision provenance projection (defaults on). */
+  captureDecisionTrace?: boolean;
 }
 
 export type PlanningStageName = import("../../spec/types.js").PlanningStage;

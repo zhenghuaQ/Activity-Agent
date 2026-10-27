@@ -119,7 +119,7 @@ function showPlanDetail(plan: Plan) {
     for (const d of [...plan.score.dimensions].sort((a, b) => b.weighted - a.weighted)) {
       const bar = "█".repeat(Math.round(d.score / 10)).padEnd(10, "·");
       console.log(
-        `        ${DimensionLabel[d.dimension].padEnd(4)} ${bar} ${String(d.score).padStart(3)}  (权重${(d.weight * 100).toFixed(0)}%) ${d.reason}`
+        `        ${DimensionLabel[d.dimension].padEnd(4)} ${bar} ${String(d.score).padStart(3)}  (权重${(d.weight * 100).toFixed(0)}%)`
       );
     }
   }

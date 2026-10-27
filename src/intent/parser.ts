@@ -14,8 +14,10 @@ import type {
   StructuredConstraints,
   TimeWindow,
   UserPreferences,
+  PlanSpecification,
 } from "../../spec/types.js";
 import { extractDestination, extractPreferredCuisine } from "../conversation/memory.js";
+import { normalizeDietaryRestriction, type DietaryRequirement } from "../../spec/dietary.js";
 
 /**
  * Mock LLM 意图解析。
@@ -120,7 +122,40 @@ export function parseIntent(rawText: string): StructuredConstraints {
   if (lower.includes("经典城市") || lower.includes("城市地标")) extraHints.push("城市地标", "历史文化");
   if (lower.includes("休闲慢游") || lower.includes("不要太赶") || lower.includes("少赶路")) extraHints.push("休闲慢游", "少赶路");
 
-  return { destination: extractDestination(lower), group, timeWindow, distance, extraHints };
+  const hardMaxDurationMinutes = extractHardMaxDurationMinutes(lower);
+  const planSpecification = extractPlanSpecification(lower);
+  return {
+    destination: extractDestination(lower), group, timeWindow, distance, extraHints,
+    ...(Object.keys(planSpecification).length ? { planSpecification } : {}),
+    ...(hardMaxDurationMinutes !== undefined ? { hardMaxDurationMinutes } : {}),
+  };
+}
+
+function extractPlanSpecification(text: string): PlanSpecification {
+  const specification: PlanSpecification = {};
+  if (/(不吃饭|不用安排吃饭|不需要餐厅|不安排餐厅|不需要用餐)/.test(text)) {
+    specification.mealPolicy = "none";
+  } else if (/(吃饭可有可无|吃不吃都行|饭可吃可不吃|用餐可有可无)/.test(text)) {
+    specification.mealPolicy = "optional";
+  } else if (/(安排吃饭|要吃饭|安排用餐|安排一顿饭|安排一餐|还是吃饭|还是安排吃饭)/.test(text)) {
+    specification.mealPolicy = "required";
+  }
+
+  const countMatch = text.match(/(?:逛|去|玩|安排)?\s*(\d+|一个|一处|两处|两个|二个|三处|三个|四处|四个|五处|五个)\s*(?:个)?\s*(景点|地方|地点|处|(?:简单)?活动)/)
+    ?? text.match(/(\d+|一个|一处|两处|两个|二个|三处|三个|四处|四个|五处|五个)\s*(景点|地方|地点|处|(?:简单)?活动)/);
+  if (countMatch && !/(多逛几个|尽量多玩|丰富一点|多玩几个)/.test(text)) {
+    const numeric = Number(countMatch[1]);
+    const chinese: Record<string, number> = { "一个": 1, "一处": 1, "两处": 2, "两个": 2, "二个": 2, "三处": 3, "三个": 3, "四处": 4, "四个": 4, "五处": 5, "五个": 5 };
+    const value = Number.isInteger(numeric) && numeric > 0 ? numeric : chinese[countMatch[1]!];
+    if (value !== undefined && value <= 20) specification.activityCount = value;
+  }
+  return specification;
+}
+
+function extractHardMaxDurationMinutes(text: string): number | undefined {
+  if (/(左右|大概|差不多|约|大约|上下)/.test(text)) return undefined;
+  const match = text.match(/(最多|只有|僅有|仅有|不超过|不能超过|不得超过|限时|限定|时间.{0,3}放宽到)\s*(\d+(?:\.\d+)?)\s*(小时|个小时|钟头)/);
+  return match ? Math.round(Number(match[2]) * 60) : undefined;
 }
 
 // ─── 辅助函数 ──────────────────────────────────────
@@ -164,14 +199,17 @@ function extractAgeGroup(text: string, total: number): AgeGroup {
   return ageGroup;
 }
 
-function extractDietaryRestrictions(text: string): string[] {
-  const restrictions: string[] = [];
-  if (text.includes("轻油盐") || text.includes("清淡")) restrictions.push("轻油盐");
-  if (text.includes("免辣") || text.includes("不吃辣")) restrictions.push("免辣");
-  if (text.includes("不吃海鲜")) restrictions.push("免海鲜");
-  if (text.includes("素食") || text.includes("吃素")) restrictions.push("素食");
-  if (text.includes("低卡")) restrictions.push("低卡");
-  return restrictions;
+function extractDietaryRestrictions(text: string): DietaryRequirement[] {
+  const phrases = [
+    "不能吃海鲜", "不吃海鲜", "不要海鲜", "免海鲜", "seafood_free",
+    "不能吃辣", "不吃辣", "不要辣", "忌辣", "免辣", "non_spicy",
+    "轻油盐", "少油盐", "清淡", "素食", "吃素",
+    "低卡", "低热量", "轻食", "软食", "易消化",
+  ];
+  return [...new Set(phrases
+    .filter(phrase => text.includes(phrase))
+    .map(phrase => normalizeDietaryRestriction(phrase))
+    .filter((requirement): requirement is DietaryRequirement => requirement !== undefined))];
 }
 
 function extractTimeWindow(text: string): TimeWindow {

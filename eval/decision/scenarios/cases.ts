@@ -1,9 +1,29 @@
 import type { DecisionScenario } from "./schema.js";
+import type { DecisionScenarioDataFixture } from "./schema.js";
+import type { DietaryRequirement } from "../../../spec/dietary.js";
 import { createBeijingFixture } from "./fixtures/beijing.js";
 import { createShanghaiFixture } from "./fixtures/shanghai.js";
 
 const beijing = (label: string) => createBeijingFixture(label);
 const shanghai = (label: string) => createShanghaiFixture(label);
+
+function addScenarioDietaryEvidence(
+  fixture: DecisionScenarioDataFixture,
+  fixtureRestaurantId: string,
+  requirements: DietaryRequirement[],
+): DecisionScenarioDataFixture {
+  const restaurant = fixture.restaurants.find(item => item.id === fixtureRestaurantId);
+  if (!restaurant) throw new Error(`scenario_dietary_fixture_restaurant_missing:${fixtureRestaurantId}`);
+  restaurant.supportedDietaryRestrictions = [...requirements];
+  return fixture;
+}
+
+const elderlyDietaryFixture = addScenarioDietaryEvidence(
+  beijing("Beijing Fixture Elderly"), "beijing_fixture_elderly_rest_005", ["轻油盐", "免海鲜"],
+);
+const dietaryUpdateFixture = addScenarioDietaryEvidence(
+  beijing("Beijing Fixture Dietary"), "beijing_fixture_dietary_rest_005", ["轻油盐", "免海鲜", "免辣"],
+);
 
 export const DECISION_SCENARIOS: DecisionScenario[] = [
   {
@@ -42,7 +62,7 @@ export const DECISION_SCENARIOS: DecisionScenario[] = [
       { user: "预算省一点，附近就好" },
       { user: "另外不吃海鲜" },
     ],
-    environment: { location: { source: "default", location: { ...beijing("Elderly").destinationCenters!.北京 } }, data: beijing("Beijing Fixture Elderly") },
+    environment: { location: { source: "default", location: { ...elderlyDietaryFixture.destinationCenters!.北京 } }, data: elderlyDietaryFixture },
     expectations: {
       expectedFeasibility: "feasible",
       finalConstraints: { leadRole: "elderly", budget: "low", dietaryRestrictions: ["轻油盐", "免海鲜"] },
@@ -189,7 +209,7 @@ export const DECISION_SCENARIOS: DecisionScenario[] = [
       { user: "周末带爸妈吃得清淡些" },
       { user: "另外不吃海鲜，也不吃辣" },
     ],
-    environment: { location: { source: "default", location: { ...beijing("Dietary").destinationCenters!.北京 } }, data: beijing("Beijing Fixture Dietary") },
+    environment: { location: { source: "default", location: { ...dietaryUpdateFixture.destinationCenters!.北京 } }, data: dietaryUpdateFixture },
     expectations: {
       expectedFeasibility: "feasible",
       finalConstraints: { leadRole: "elderly", dietaryRestrictions: ["轻油盐", "免海鲜", "免辣"] },

@@ -27,6 +27,11 @@ blob-report/
 
 # Runtime and temporary data
 /data/
+/eval-results/stress/
+/eval-results/judge/
+/eval-results/decision-artifacts/
+/eval-results/pairwise/
+/eval-results/diagnostics/
 /tmp/
 /temp/
 

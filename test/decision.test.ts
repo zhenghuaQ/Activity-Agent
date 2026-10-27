@@ -12,6 +12,8 @@ import { DEFAULT_WEIGHTS } from "../spec/decision.js";
 import { scorePlan } from "../src/decision/score.js";
 import { adjustWeights } from "../src/decision/context.js";
 import { buildPareto } from "../src/decision/pareto.js";
+import { compareScoredPlans } from "../src/decision/pareto.js";
+import { getCanonicalPlanIdentity } from "../src/decision/plan-identity.js";
 import { explainPlan } from "../src/decision/explain.js";
 
 const HOME = { lat: 39.995, lng: 116.47, address: "望京", city: "北京" };
@@ -185,6 +187,109 @@ describe("buildPareto 多目标方案", () => {
     if (budgetCand) expect(budgetCand.plan.id).toBe("cheap");
     const expCand = result.pareto.find((c) => c.objective === "experience");
     if (expCand) expect(expCand.plan.id).toBe("fancy");
+  });
+
+  it("uses a role-aware canonical identity independent of activity order and temporary plan IDs", () => {
+    const first = makePlan("plan_1", [attr("a-2", 50, 4), rest("r-1", 50, 4, "粤菜")], 10);
+    const reordered = makePlan("plan_987", [rest("r-1", 50, 4, "粤菜"), attr("a-2", 50, 4)], 10);
+    const differentRole = makePlan("plan_1", [attr("r-1", 50, 4), rest("a-2", 50, 4, "粤菜")], 10);
+
+    expect(getCanonicalPlanIdentity(first)).toBe(getCanonicalPlanIdentity(reordered));
+    expect(getCanonicalPlanIdentity(first)).not.toBe(getCanonicalPlanIdentity(differentRole));
+  });
+
+  it("keeps all four objective representatives stable across every permutation of three tied plans", () => {
+    const makeTied = (id: string, placeId: string): PlanCandidate => {
+      const plan = makePlan(id, [attr(placeId, 50, 4), rest(`r-${placeId}`, 50, 4, "粤菜")], 10);
+      plan.score = {
+        total: 80,
+        confidence: 0.8,
+        dimensions: ["time", "transit", "preference", "crowd", "budget", "popularity"].map(dimension => ({
+          dimension: dimension as "time" | "transit" | "preference" | "crowd" | "budget" | "popularity",
+          score: 80,
+          weight: 0,
+          weighted: 0,
+          reason: "",
+        })),
+      };
+      return { plan, feasibilityScore: 90, reason: "" };
+    };
+    const candidates = [makeTied("plan_1", "place-c"), makeTied("plan_2", "place-a"), makeTied("plan_3", "place-b")];
+    const permutations = [
+      candidates,
+      [candidates[0]!, candidates[2]!, candidates[1]!],
+      [candidates[1]!, candidates[0]!, candidates[2]!],
+      [candidates[1]!, candidates[2]!, candidates[0]!],
+      [candidates[2]!, candidates[0]!, candidates[1]!],
+      [candidates[2]!, candidates[1]!, candidates[0]!],
+    ];
+    const expectedWinner = getCanonicalPlanIdentity(candidates[1]!.plan);
+    const outputs = permutations.map(permutation => {
+      const result = buildPareto(permutation)!;
+      return {
+        recommended: getCanonicalPlanIdentity(result.recommended.plan),
+        representatives: result.pareto.map(candidate => [candidate.objective, getCanonicalPlanIdentity(candidate.plan)]),
+      };
+    });
+
+    expect(outputs.every(output => output.recommended === expectedWinner)).toBe(true);
+    expect(outputs.every(output => JSON.stringify(output.representatives) === JSON.stringify(outputs[0]!.representatives))).toBe(true);
+    expect(outputs[0]!.representatives).toEqual([["balanced", expectedWinner]]);
+  });
+
+  it("selects each objective's tied representative by canonical identity", () => {
+    const metrics = [
+      { id: "plan_1", placeId: "balanced-z", total: 100, preference: 0, popularity: 0, transit: 0, time: 0, budget: 0 },
+      { id: "plan_2", placeId: "balanced-a", total: 100, preference: 0, popularity: 0, transit: 0, time: 0, budget: 0 },
+      { id: "plan_3", placeId: "experience-z", total: 50, preference: 100, popularity: 100, transit: 0, time: 0, budget: 0 },
+      { id: "plan_4", placeId: "experience-a", total: 50, preference: 100, popularity: 100, transit: 0, time: 0, budget: 0 },
+      { id: "plan_5", placeId: "time-z", total: 50, preference: 0, popularity: 0, transit: 100, time: 100, budget: 0 },
+      { id: "plan_6", placeId: "time-a", total: 50, preference: 0, popularity: 0, transit: 100, time: 100, budget: 0 },
+      { id: "plan_7", placeId: "budget-z", total: 50, preference: 0, popularity: 0, transit: 0, time: 0, budget: 100 },
+      { id: "plan_8", placeId: "budget-a", total: 50, preference: 0, popularity: 0, transit: 0, time: 0, budget: 100 },
+    ];
+    const candidates: PlanCandidate[] = metrics.map(value => {
+      const plan = makePlan(value.id, [attr(value.placeId, 50, 4), rest(`r-${value.placeId}`, 50, 4, "粤菜")], 10);
+      plan.score = {
+        total: value.total,
+        confidence: 0.8,
+        dimensions: [
+          ["time", value.time], ["transit", value.transit], ["preference", value.preference],
+          ["crowd", 0], ["budget", value.budget], ["popularity", value.popularity],
+        ].map(([dimension, score]) => ({
+          dimension: dimension as "time" | "transit" | "preference" | "crowd" | "budget" | "popularity",
+          score: score as number, weight: 0, weighted: 0, reason: "",
+        })),
+      };
+      return { plan, feasibilityScore: 90, reason: "" };
+    });
+    const runs = [candidates, [...candidates].reverse(), [...candidates.slice(3), ...candidates.slice(0, 3)]];
+    const representativeIdentities = runs.map(run => buildPareto(run)!.pareto.map(candidate => [
+      candidate.objective,
+      getCanonicalPlanIdentity(candidate.plan),
+    ]));
+
+    expect(representativeIdentities[0]).toEqual([
+      ["balanced", getCanonicalPlanIdentity(candidates[1]!.plan)],
+      ["experience", getCanonicalPlanIdentity(candidates[3]!.plan)],
+      ["time_saver", getCanonicalPlanIdentity(candidates[5]!.plan)],
+      ["budget_saver", getCanonicalPlanIdentity(candidates[7]!.plan)],
+    ]);
+    expect(representativeIdentities[1]).toEqual(representativeIdentities[0]);
+    expect(representativeIdentities[2]).toEqual(representativeIdentities[0]);
+  });
+
+  it("uses canonical identity only for exact ties and preserves higher business scores", () => {
+    const canonicalFirst: PlanCandidate = { plan: makePlan("plan_z", [attr("a", 20, 4), rest("r-a", 20, 4, "粤菜")], 1), feasibilityScore: 90, reason: "" };
+    const canonicalSecond: PlanCandidate = { plan: makePlan("plan_a", [attr("z", 20, 4), rest("r-z", 20, 4, "粤菜")], 1), feasibilityScore: 90, reason: "" };
+    const score = (candidate: PlanCandidate) => candidate.plan.id === "plan_z" ? 0.9 : 0.8;
+    expect(compareScoredPlans(canonicalFirst, canonicalSecond, score)).toBeLessThan(0);
+    expect(compareScoredPlans(canonicalSecond, canonicalFirst, score)).toBeGreaterThan(0);
+    expect(compareScoredPlans(canonicalFirst, canonicalFirst, score)).toBe(0);
+
+    const tied = () => 1;
+    expect(compareScoredPlans(canonicalFirst, canonicalSecond, tied)).toBeLessThan(0);
+    expect(compareScoredPlans(canonicalSecond, canonicalFirst, tied)).toBeGreaterThan(0);
   });
 });
 

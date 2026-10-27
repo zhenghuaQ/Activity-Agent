@@ -3,6 +3,7 @@
 // ============================================================
 
 import type { AgeGroup, Activity, Plan } from "./types.js";
+import type { DietaryCompatibilityStatus, DietaryRequirement } from "./dietary.js";
 
 // ─── 约束检查结果 ──────────────────────────────────────
 
@@ -10,6 +11,55 @@ export interface ConstraintCheck {
   passed: boolean;
   rule: string;
   detail: string;
+  actualMinutes?: number;
+  limitMinutes?: number;
+  dietaryEvidence?: Array<{
+    restaurantId: string;
+    requirement: DietaryRequirement;
+    status: DietaryCompatibilityStatus;
+  }>;
+  /** Structured evidence for generic Plan slot completeness failures. */
+  planCompleteness?: {
+    requirementId: string;
+    role: string;
+    requiredMin: number;
+    actualCount: number;
+    source: "template" | "constraint" | "user";
+    requiredMax?: number;
+  };
+}
+
+export interface PlanCompletenessRequirement {
+  readonly requirementId: string;
+  readonly role: string;
+  readonly minCount: number;
+  readonly maxCount?: number;
+  readonly source: "template" | "constraint" | "user";
+  /** Compatibility projection used only by the current default Activity template. */
+  readonly legacyFailureRule?: "has_attraction" | "has_restaurant" | "has_break_for_elderly";
+}
+
+export interface PlanCompletenessRequirements {
+  readonly templateId: string;
+  readonly requirements: readonly PlanCompletenessRequirement[];
+}
+
+/** Measures first scheduled start through final scheduled end; transit gaps are already on this timeline. */
+export function computePlanElapsedMinutes(plan: Plan): number | undefined {
+  const scheduled = plan.activities.slice().sort((left, right) => left.order - right.order);
+  const first = scheduled[0];
+  const last = scheduled[scheduled.length - 1];
+  if (!first || !last) return undefined;
+  return timeToMinutes(last.scheduledEnd) - timeToMinutes(first.scheduledStart);
+}
+
+/** Candidate-level evidence retained by Stage 4, including rejected plans. */
+export interface CandidateHardConstraintEvaluation {
+  candidateId: string;
+  planId: string;
+  passed: boolean;
+  checks: ConstraintCheck[];
+  hardFailures: ConstraintCheck[];
 }
 
 // ─── 时间检查 ──────────────────────────────────────────
@@ -74,25 +124,6 @@ export function checkAgeDietaryFit(
 }
 
 // ─── 方案完整性检查 ──────────────────────────────────────
-
-export function checkPlanCompleteness(plan: Plan): ConstraintCheck[] {
-  const types = plan.activities.map(a => a.place.type);
-  const results: ConstraintCheck[] = [];
-
-  if (!types.includes("attraction") && !types.includes("walking")) {
-    results.push({ passed: false, rule: "has_attraction", detail: "方案缺少游玩/景点环节" });
-  }
-  if (!types.includes("restaurant")) {
-    results.push({ passed: false, rule: "has_restaurant", detail: "方案缺少用餐环节" });
-  }
-  if (plan.leadRole === "elderly" || plan.leadRole === "mixed_family") {
-    if (!types.includes("break")) {
-      results.push({ passed: false, rule: "has_break_for_elderly", detail: "有老年人但缺少茶歇休息环节" });
-    }
-  }
-
-  return results;
-}
 
 // ─── 工具函数 ──────────────────────────────────────────
 

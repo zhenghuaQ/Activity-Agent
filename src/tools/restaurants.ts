@@ -6,6 +6,8 @@
 // ============================================================
 
 import type { Restaurant } from "../../spec/types.js";
+import { normalizeDietaryRestriction } from "../../spec/dietary.js";
+import { evaluateRestaurantDietaryCompatibility } from "../constraints/dietary.js";
 import type { ActivityDataProviderV1 } from "../../spec/datasource.js";
 import type * as T from "../../spec/tools.js";
 import {
@@ -44,9 +46,11 @@ export class SearchRestaurantsTool extends BaseTool<
     } catch (error) { rethrowProviderError(error); }
 
     // 忌口匹配
-    const restrictions = input.dietaryRestrictions ?? [];
+    const restrictions = (input.dietaryRestrictions ?? [])
+      .map(normalizeDietaryRestriction)
+      .filter((value): value is NonNullable<typeof value> => value !== undefined);
     if (restrictions.length > 0) {
-      results = results.filter((r) => r.dietaryOptions);
+      results = results.filter((r) => evaluateRestaurantDietaryCompatibility(r, restrictions).passed);
     }
     if (restrictions.includes("低卡") && restrictions.includes("轻食")) {
       results = results.filter(r => r.tags.includes("低卡") && r.tags.includes("轻食"));

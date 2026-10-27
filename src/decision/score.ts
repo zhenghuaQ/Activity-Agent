@@ -16,6 +16,8 @@ import { ALL_DIMENSIONS } from "../../spec/decision.js";
 import { normalizeWeights } from "./weights.js";
 import { timeToMinutes } from "../../spec/constraints.js";
 import { predictCrowd } from "../data/crowd.js";
+import { evaluatePlanDistancePreference } from "./distance-preference.js";
+import { evaluatePlanGroupSuitability } from "./group-suitability.js";
 import type { CrowdPrediction } from "../../spec/datasource.js";
 import {
   TIME_IDEAL_RATIO,
@@ -26,7 +28,6 @@ import {
   PREF_BASE_SCORE,
   PREF_CUISINE_HIT_BONUS,
   PREF_DIET_HIT_BONUS,
-  PREF_RESTRICTION_BONUS,
   PREF_LOCAL_FEATURE_BONUS,
   CROWD_PENALTY,
   CROWD_UNKNOWN_PENALTY,
@@ -97,21 +98,42 @@ function scorePreference(input: ScoringInput): DimResult {
       score += PREF_DIET_HIT_BONUS;
       hits.push("满足轻食/减脂");
     }
-    if (prefs.dietaryRestrictions.length > 0 && r.dietaryOptions) {
-      score += PREF_RESTRICTION_BONUS;
-      hits.push("支持忌口定制");
-    }
   }
 
   const hasLocalFeature = input.plan.activities.some((a) => a.place.localFeatures.length > 0);
   if (hasLocalFeature) {
     score += PREF_LOCAL_FEATURE_BONUS;
-    hits.push("含当地特色");
   }
 
+  const legacyScore = clamp(score);
+  const distancePreference = evaluatePlanDistancePreference(input.plan, input.constraints);
+  const groupSuitability = evaluatePlanGroupSuitability(input.plan, input.constraints);
+  if (distancePreference.status === "inactive" && !groupSuitability.applicable) {
+    return { score: legacyScore, reason: hits.length > 0 ? hits.join("；") : "偏好匹配一般" };
+  }
+
+  // Keep the legacy aggregate intact as one active signal, and normalize only
+  // the signals that are present. With distance as the sole active preference,
+  // it alone determines this dimension instead of inheriting the old base 60.
+  const hasLegacySignal = Boolean(prefs.preferredCuisine?.length || prefs.dieting || hasLocalFeature);
+  const activeComponents = [
+    ...(hasLegacySignal ? [legacyScore] : []),
+    ...(distancePreference.normalizedScore !== undefined ? [distancePreference.normalizedScore * SCORE_MAX] : []),
+    ...(groupSuitability.score !== undefined ? [groupSuitability.score * SCORE_MAX] : []),
+  ];
+  const combinedScore = activeComponents.length > 0
+    ? activeComponents.reduce((sum, component) => sum + component, 0) / activeComponents.length
+    : legacyScore;
+  const distanceReason = distancePreference.normalizedScore !== undefined
+    ? `距离偏好：方案最远地点 ${distancePreference.distanceKm}km / 偏好 ${input.constraints.distance.preferredMaxKm}km（${Math.round(distancePreference.normalizedScore * 100)}%）`
+    : "距离偏好未评分：方案地点缺少有效距离数据";
+  const groupReason = groupSuitability.applicable
+    ? `同行适配：${groupSuitability.evidence.join(", ")}（${Math.round((groupSuitability.score ?? 0) * SCORE_MAX)}%）`
+    : undefined;
+
   return {
-    score: clamp(score),
-    reason: hits.length > 0 ? hits.join("；") : "偏好匹配一般",
+    score: clamp(combinedScore),
+    reason: [...(hits.length > 0 ? hits : hasLegacySignal ? ["现有偏好信号"] : []), ...(groupReason ? [groupReason] : []), ...(distancePreference.status === "inactive" ? [] : [distanceReason])].join("；"),
   };
 }
 

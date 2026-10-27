@@ -16,6 +16,7 @@ import type {
   Scenario,
   Attraction,
   BreakPlace,
+  Place,
   FollowUpAnswer,
   FollowUpQuestion,
   LeadRole,
@@ -37,12 +38,24 @@ import { scheduleActivities } from "./scheduler.js";
 import { filterWithinRadius } from "../core/geo.js";
 import { runDecision, withSpatialRadiusEscalation } from "../decision/index.js";
 import type { SearchArea } from "../../spec/datasource.js";
-import type { PlaceCandidate, PlaceSearchRequest, PlaceSearchTask } from "../../spec/place-search.js";
+import type { PlaceCandidate, PlaceSearchRequest } from "../../spec/place-search.js";
 import { createInitialSearchPolicy } from "./search-policy.js";
+import { evaluatePlanHardConstraints } from "../constraints/engine.js";
+import { buildEffectivePlanCompletenessRequirements } from "../constraints/plan-completeness.js";
+import type { CandidateHardConstraintEvaluation } from "../../spec/constraints.js";
+import { buildActivityPlanTemplate, resolvePlanSpecification, composePlanAssignments, getAssignedPlaces, searchRoleToPlanSlotRole } from "./plan-composition.js";
+import type { PlanSlotRole, SlotAssignment } from "./plan-composition.js";
 
 /** Candidate generation 的只读运行环境；位置唯一来源是 Runtime Environment。 */
 export interface PlanningEnvironment {
   userLocation: ResolvedLocation;
+}
+
+function getStateCompletenessRequirements(state: PlanningState) {
+  if (!state.constraints) return undefined;
+  const resolved = state.resolvedPlanSpecification ?? resolvePlanSpecification(state.constraints.planSpecification);
+  return state.planCompletenessRequirements
+    ?? buildEffectivePlanCompletenessRequirements(buildActivityPlanTemplate(resolved), state.constraints);
 }
 
 // ─── Stage 1: 意图解析 ──────────────────────────────
@@ -176,6 +189,20 @@ export async function stage3_generateCandidates(
   }
 
   const { group, timeWindow } = state.constraints;
+  const resolvedPlanSpecification = state.resolvedPlanSpecification ?? resolvePlanSpecification(state.constraints.planSpecification);
+  const activeTemplate = buildActivityPlanTemplate(resolvedPlanSpecification);
+  if (resolvedPlanSpecification.activityCount.value > 1) {
+    return {
+      ...state,
+      stage: "candidate_generation",
+      resolvedPlanSpecification,
+      planCompletenessRequirements: state.planCompletenessRequirements
+        ?? buildEffectivePlanCompletenessRequirements(activeTemplate, state.constraints),
+      candidates: [],
+      planningNotes: [...(state.planningNotes ?? []), "MULTI_ACTIVITY_SEQUENCE_GAP: 缺少基于路线与行程成本的同类活动访问顺序规划；显式数量未降级"],
+      errors: [...(state.errors ?? [])],
+    };
+  }
   const searchRadiusKm = state.searchPolicy?.radiusKm ?? createInitialSearchPolicy(state.constraints).radiusKm;
   const leadRole = group.leadRole;
   const errors: string[] = [];
@@ -211,36 +238,45 @@ export async function stage3_generateCandidates(
     categories: ["attraction", "museum", "park", "gallery"],
     preferredTags: [...getCrowdTagsForScenario(group.scenario, group.leadRole)],
   }};
-  const searchTasks: PlaceSearchTask[] = [{ role: "primary_activity", request: primaryRequest }];
-  const attEsc = await withSpatialRadiusEscalation(primaryRequest, async (request) => {
+  const needsActivity = activeTemplate.slots.some(slot => slot.role === "activity" && slot.max > 0);
+  const needsMeal = activeTemplate.slots.some(slot => slot.role === "meal" && slot.max > 0);
+  const needsRest = activeTemplate.slots.some(slot => slot.role === "rest" && slot.max > 0);
+  let attEsc: import("../decision/fallback.js").EscalationResult<PlaceCandidate> | undefined;
+  if (needsActivity) {
+  attEsc = await withSpatialRadiusEscalation(primaryRequest, async (request) => {
     const r = await (toolExecutor
       ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", request)
       : placeTool.execute(request));
     return r.status === "error" ? [] : (r.data as { places: PlaceCandidate[] }).places.filter((c: PlaceCandidate) => c.detail.type === "attraction");
   }, { minCount: 2, maxRadius: state.searchPolicy?.maxRadiusKm ?? state.constraints.distance.hardMaxKm ?? 30 });
   if (attEsc.note) planningNotes.push(`景点：${attEsc.note}`);
-  if (state.constraints.distance.hardMaxKm !== undefined
+  if (attEsc && state.constraints.distance.hardMaxKm !== undefined
     && attEsc.radiusUsed >= state.constraints.distance.hardMaxKm && attEsc.items.length < 2) {
     planningNotes.push("SEARCH_RADIUS_HARD_CAP_REACHED: 景点检索已达到用户硬距离上限");
+  }
   }
 
   const mealRequest: PlaceSearchRequest = { spatial, intent: {
     categories: ["restaurant"],
-    requiredTags: group.preferences.dietaryRestrictions.length > 0 ? ["dietary_options"] : undefined,
+    dietaryRequirements: group.preferences.dietaryRestrictions.length > 0
+      ? [...group.preferences.dietaryRestrictions]
+      : undefined,
     preferredTags: group.preferences.dieting ? ["轻食", "低卡", "健康餐"] : undefined,
     filters: group.preferences.preferredCuisine && group.preferences.preferredCuisine.length > 0 ? { cuisines: group.preferences.preferredCuisine } : undefined,
   }};
-  searchTasks.push({ role: "meal", request: mealRequest });
-  const restEsc = await withSpatialRadiusEscalation(mealRequest, async (request) => {
+  let restEsc: import("../decision/fallback.js").EscalationResult<PlaceCandidate> | undefined;
+  if (needsMeal) {
+  restEsc = await withSpatialRadiusEscalation(mealRequest, async (request) => {
     const r = await (toolExecutor
       ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", request)
       : placeTool.execute(request));
     return r.status === "error" ? [] : (r.data as { places: PlaceCandidate[] }).places.filter((c: PlaceCandidate) => c.detail.type === "restaurant");
   }, { minCount: 2, maxRadius: state.searchPolicy?.maxRadiusKm ?? state.constraints.distance.hardMaxKm ?? 30 });
   if (restEsc.note) planningNotes.push(`餐厅：${restEsc.note}`);
-  if (state.constraints.distance.hardMaxKm !== undefined
+  if (restEsc && state.constraints.distance.hardMaxKm !== undefined
     && restEsc.radiusUsed >= state.constraints.distance.hardMaxKm && restEsc.items.length < 2) {
     planningNotes.push("SEARCH_RADIUS_HARD_CAP_REACHED: 餐厅检索已达到用户硬距离上限");
+  }
   }
 
   // 配送搜索（仅情侣场景自动附加配送，优先鲜花 > 蛋糕）
@@ -256,17 +292,16 @@ export async function stage3_generateCandidates(
       ...(group.ageGroup.youngChildren > 0 ? ["kids_friendly"] : []),
     ],
   }};
-  searchTasks.push({ role: "rest", request: restRequest });
-  const breakResult = await (toolExecutor
+  const breakResult = needsRest ? await (toolExecutor
     ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", restRequest)
-    : placeTool.execute(restRequest));
+    : placeTool.execute(restRequest)) : undefined;
 
-  let attractions: Attraction[] = attEsc.items.map((candidate) => candidate.detail).filter((p): p is Attraction => p.type === "attraction");
-  const restaurants: Restaurant[] = restEsc.items.map((candidate) => candidate.detail).filter((p): p is Restaurant => p.type === "restaurant");
-  const breaks: BreakPlace[] = breakResult.status === "error" ? [] : (breakResult.data as { places: PlaceCandidate[] }).places.map((candidate: PlaceCandidate) => candidate.detail).filter((p): p is BreakPlace => p.type === "break");
+  let attractions: Attraction[] = (attEsc?.items ?? []).map((candidate) => candidate.detail).filter((p): p is Attraction => p.type === "attraction");
+  const restaurants: Restaurant[] = (restEsc?.items ?? []).map((candidate) => candidate.detail).filter((p): p is Restaurant => p.type === "restaurant");
+  const breaks: BreakPlace[] = !breakResult || breakResult.status === "error" ? [] : (breakResult.data as { places: PlaceCandidate[] }).places.map((candidate: PlaceCandidate) => candidate.detail).filter((p): p is BreakPlace => p.type === "break");
 
   // L2 放宽过滤：景点仍为空则去掉人群标签再搜一次
-  if (attractions.length === 0) {
+  if (needsActivity && attractions.length === 0) {
     const relaxedInput: PlaceSearchRequest = { spatial, intent: { categories: ["attraction", "museum", "park", "gallery"] } };
     const relaxed = await (toolExecutor
       ? toolExecutor.execute<PlaceSearchRequest, { places: PlaceCandidate[] }>("search_places", relaxedInput)
@@ -277,63 +312,50 @@ export async function stage3_generateCandidates(
     }
   }
 
-  // ── 组合方案：选 top-2 景点 × top-2 餐厅 × top-1 茶歇 ──
-  // 场景感知重排序：为特定场景提升相关景点优先级
+  // Preserve retrieval policy exactly: rerank, then truncate each existing pool.
   const reRankedAttractions = rerankForScenario(attractions, group.scenario, group.leadRole);
   const topAttractions = reRankedAttractions.slice(0, 2);
   const topRestaurants = restaurants.slice(0, 2);
   const topBreak = breaks.slice(0, 1);
 
+  const candidatePools = new Map<PlanSlotRole, readonly Place[]>();
+  const addPool = (searchRole: string, places: readonly Place[]) => {
+    const slotRole = searchRoleToPlanSlotRole(searchRole);
+    if (slotRole) candidatePools.set(slotRole, places);
+  };
+  if (needsActivity) addPool("primary_activity", topAttractions);
+  if (needsMeal) addPool("meal", topRestaurants);
+  addPool("rest", topBreak);
+
+  // The existing time-window rule controls whether the optional rest slot is
+  // active; when active it remains mandatory if a topBreak candidate exists,
+  // matching the previous generator's includeBreak behavior.
+  const includeBreak = topBreak.length > 0 && timeWindow.durationHours > 4;
+  const enabledSlotIds = new Set(activeTemplate.slots.filter(slot => slot.role !== "rest" || includeBreak).map(slot => slot.slotId));
+  const requiredSlotIds = new Set(activeTemplate.slots.filter(slot => slot.min > 0 || (slot.role === "rest" && includeBreak)).map(slot => slot.slotId));
+  const assignments = composePlanAssignments(activeTemplate, candidatePools, { enabledSlotIds, requiredSlotIds });
+
   const candidates: PlanCandidate[] = [];
   let planIdx = 0;
 
-  for (const attr of topAttractions) {
-    for (const rest of topRestaurants) {
-      // 短行程(≤4h)不插入茶歇
-      const includeBreak = topBreak.length > 0 && timeWindow.durationHours > 4;
-      const places = includeBreak ? [attr, ...topBreak, rest] : [attr, rest];
-      const { activities, totalMinutes } = await scheduleActivities(
-        places,
-        timeWindow.start,
-        searchOrigin
-      );
-
-      // 检查总时长是否在窗口内
-      const totalHours = totalMinutes / 60;
-      if (totalHours < 3 || totalHours > 7) continue;
-
-      const deliveryName = deliveryItems.length > 0
-      ? (deliveryItems.find(d => d.name.includes("花")) ?? deliveryItems[0]).name
-      : "";
-      const deliveryNote = deliveryName ? ` + ${deliveryName}` : "";
-
-      const plan: Plan = {
-        id: `plan_${++planIdx}`,
-        scenario: group.scenario,
-        leadRole,
-        activities,
-        totalDurationHours: Math.round(totalHours * 10) / 10,
-        totalTransitMinutes: activities.reduce(
-          (sum, a) => sum + (a.transitTo?.totalMinutes ?? 0),
-          0
-        ),
-        feasibilityScore: 0,
-        summary: (includeBreak ? `${attr.name} → ${topBreak[0].name} → ${rest.name}` : `${attr.name} → ${rest.name}`) + deliveryNote,
-      };
-
-      plan.feasibilityScore = calcFeasibilityScore(plan);
-
-      candidates.push({
-        plan,
-        feasibilityScore: plan.feasibilityScore,
-        reason: `推荐: ${plan.summary}`,
-      });
-    }
+  for (const assignment of assignments) {
+    const candidate = await assembleActivityPlan(assignment, {
+      id: `plan_${planIdx + 1}`,
+      scenario: group.scenario,
+      leadRole,
+      startTime: timeWindow.start,
+      searchOrigin,
+      deliveryItems,
+    });
+    if (!candidate) continue;
+    planIdx++;
+    candidates.push(candidate);
   }
 
   return {
     ...state,
     stage: "candidate_generation",
+    resolvedPlanSpecification,
     searchPolicy: state.searchPolicy ?? createInitialSearchPolicy(state.constraints),
     resolvedSearchArea,
     planRevision: state.planRevision ?? 0,
@@ -343,27 +365,74 @@ export async function stage3_generateCandidates(
   };
 }
 
+/** Domain adapter from generic slot assignment into the existing Activity Plan model. */
+async function assembleActivityPlan(
+  assignment: SlotAssignment[],
+  input: { id: string; scenario: Scenario; leadRole: LeadRole; startTime: string; searchOrigin: import("../../spec/types.js").GeoLocation; deliveryItems: DeliveryItem[] },
+): Promise<PlanCandidate | undefined> {
+  const places = getAssignedPlaces(assignment);
+  const { activities, totalMinutes } = await scheduleActivities(places, input.startTime, input.searchOrigin);
+  const totalHours = totalMinutes / 60;
+  if (totalHours < 3 || totalHours > 7) return undefined;
+
+  const deliveryName = input.deliveryItems.length > 0
+    ? (input.deliveryItems.find(item => item.name.includes("花")) ?? input.deliveryItems[0]!).name
+    : "";
+  const deliveryNote = deliveryName ? ` + ${deliveryName}` : "";
+  const plan: Plan = {
+    id: input.id,
+    scenario: input.scenario,
+    leadRole: input.leadRole,
+    activities,
+    totalDurationHours: Math.round(totalHours * 10) / 10,
+    totalTransitMinutes: activities.reduce((sum, item) => sum + (item.transitTo?.totalMinutes ?? 0), 0),
+    feasibilityScore: 0,
+    summary: places.map(place => place.name).join(" → ") + deliveryNote,
+  };
+  plan.feasibilityScore = calcFeasibilityScore(plan);
+  return { plan, feasibilityScore: plan.feasibilityScore, reason: `推荐: ${plan.summary}` };
+}
+
 // ─── Stage 4: 可行性校验 ──────────────────────────────
 
 export async function stage4_feasibilityCheck(
   state: PlanningState,
   toolExecutor?: ToolExecutor
 ): Promise<PlanningState> {
+  const completenessRequirements = getStateCompletenessRequirements(state);
   if (!state.candidates || state.candidates.length === 0) {
-    return { ...state, stage: "feasibility_check", errors: [...(state.errors ?? []), "无候选方案可校验"] };
+    return { ...state, stage: "feasibility_check", planCompletenessRequirements: completenessRequirements, errors: [...(state.errors ?? []), "无候选方案可校验"] };
   }
 
   const availabilityTool = toolRegistry.get("check_attraction_availability");
   const restAvailTool = toolRegistry.get("check_restaurant_availability");
 
-  if (!availabilityTool || !restAvailTool) {
+  const containsAttraction = state.candidates?.some(candidate => candidate.plan.activities.some(activity => activity.place.type === "attraction"));
+  const containsRestaurant = state.candidates?.some(candidate => candidate.plan.activities.some(activity => activity.place.type === "restaurant"));
+  if ((containsAttraction && !availabilityTool) || (containsRestaurant && !restAvailTool)) {
     return { ...state, stage: "feasibility_check", errors: ["校验Tool未注册"] };
   }
 
   const { group } = state.constraints!;
   const validCandidates: PlanCandidate[] = [];
+  const candidateHardEvaluations: CandidateHardConstraintEvaluation[] = [];
+  const rejectedCandidates: CandidateHardConstraintEvaluation[] = [];
 
   for (const cand of state.candidates) {
+    const hardEvaluation = evaluatePlanHardConstraints(cand.plan, state.constraints!, completenessRequirements);
+    const candidateEvaluation: CandidateHardConstraintEvaluation = {
+      candidateId: cand.plan.id,
+      planId: cand.plan.id,
+      passed: hardEvaluation.passed,
+      checks: hardEvaluation.checks,
+      hardFailures: hardEvaluation.hardFailures,
+    };
+    candidateHardEvaluations.push(candidateEvaluation);
+    if (!hardEvaluation.passed) {
+      rejectedCandidates.push(candidateEvaluation);
+      continue;
+    }
+
     let allOk = true;
 
     // 对每个活动做可用性检查
@@ -375,7 +444,7 @@ export async function stage4_feasibilityCheck(
         };
         const res = await (toolExecutor
           ? toolExecutor.execute<typeof availabilityInput, { available: boolean }>("check_attraction_availability", availabilityInput)
-          : availabilityTool.execute(availabilityInput));
+          : availabilityTool!.execute(availabilityInput));
         if (res.status !== "error" && !res.data.available) {
           allOk = false;
         }
@@ -389,7 +458,7 @@ export async function stage4_feasibilityCheck(
         };
         const res = await (toolExecutor
           ? toolExecutor.execute<typeof restaurantAvailabilityInput, { estimatedWaitMinutes: number }>("check_restaurant_availability", restaurantAvailabilityInput)
-          : restAvailTool.execute(restaurantAvailabilityInput));
+          : restAvailTool!.execute(restaurantAvailabilityInput));
         if (res.status !== "error" && res.data.estimatedWaitMinutes > 30) {
           allOk = false;
         }
@@ -405,18 +474,29 @@ export async function stage4_feasibilityCheck(
   }
 
   if (validCandidates.length === 0) {
+    const allCandidatesRejectedByHardFeasibility = rejectedCandidates.length > 0
+      && rejectedCandidates.length === state.candidates.length
+      && (state.errors?.length ?? 0) === 0;
     return {
       ...state,
       stage: "feasibility_check",
-      errors: [...(state.errors ?? []), "所有候选方案均无法满足可用性要求"],
-      candidates: state.candidates,
+      planCompletenessRequirements: completenessRequirements,
+      errors: allCandidatesRejectedByHardFeasibility
+        ? [...(state.errors ?? [])]
+        : [...(state.errors ?? []), "所有候选方案均未通过硬约束或可用性检查"],
+      candidates: [],
+      candidateHardEvaluations,
+      rejectedCandidates,
     };
   }
 
   return {
     ...state,
     stage: "feasibility_check",
+    planCompletenessRequirements: completenessRequirements,
     candidates: rankCandidates(validCandidates),
+    candidateHardEvaluations,
+    rejectedCandidates,
   };
 }
 
@@ -429,36 +509,48 @@ export async function stage5_selectBest(
     weather?: import("../../spec/decision.js").WeatherCondition;
     weightOverride?: Partial<import("../../spec/decision.js").ScoringWeights>;
     environmentLocation?: ResolvedLocation;
+    onDecisionTrace?: (input: { scoredCandidates: PlanCandidate[]; decision: import("../../spec/decision.js").DecisionResult }) => void;
   }
 ): Promise<PlanningState> {
-  if (!state.candidates || state.candidates.length === 0) {
+  const completenessRequirements = getStateCompletenessRequirements(state);
+  const sourceCandidates = state.candidates ?? [];
+  const feasibleCandidates = sourceCandidates.filter((candidate) =>
+    evaluatePlanHardConstraints(candidate.plan, state.constraints!, completenessRequirements).passed);
+  if (feasibleCandidates.length === 0) {
     return {
       ...state,
       stage: "fine_scheduling",
+      planCompletenessRequirements: completenessRequirements,
+      candidates: [],
       errors: [...(state.errors ?? []), "无可选方案"],
     };
   }
 
   // 多维评分 + 情境调权 + 帕累托多方案
-  const decision = await runDecision(state.candidates, state.constraints!, {
+  const decision = await runDecision(feasibleCandidates, state.constraints!, {
     date: opts?.date,
     weather: opts?.weather,
     weightOverride: opts?.weightOverride,
     notes: state.planningNotes,
     environmentLocation: opts?.environmentLocation,
+    planCompletenessRequirements: completenessRequirements,
   });
 
   if (!decision) {
     return {
       ...state,
       stage: "fine_scheduling",
+      planCompletenessRequirements: completenessRequirements,
       errors: [...(state.errors ?? []), "决策引擎未产出方案"],
     };
   }
 
+  try { opts?.onDecisionTrace?.({ scoredCandidates: feasibleCandidates, decision }); } catch { /* Observability must not affect a decision. */ }
+
   return {
     ...state,
     stage: "fine_scheduling",
+    planCompletenessRequirements: completenessRequirements,
     decision,
     candidates: decision.pareto,
     selectedPlan: decision.recommended.plan,

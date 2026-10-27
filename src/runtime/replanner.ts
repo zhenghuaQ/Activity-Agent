@@ -96,6 +96,8 @@ export function applyReplanPatch(
     stage: "candidate_generation",
     termination: undefined,
     constraints: state.planning.constraints,
+    planCompletenessRequirements: state.planning.planCompletenessRequirements,
+    resolvedPlanSpecification: state.planning.resolvedPlanSpecification,
     followUpQuestions: state.planning.followUpQuestions,
     planningNotes: state.planning.planningNotes,
     resolvedSearchArea: state.planning.resolvedSearchArea,

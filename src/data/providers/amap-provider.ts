@@ -223,7 +223,7 @@ export class AmapProvider implements ActivityDataProviderV1 {
           avgDurationMinutes: 75,
           hasQueue: false,
           queueCount: 0,
-          dietaryOptions: true,
+          dietaryOptions: false,
         };
         return [r];
       });

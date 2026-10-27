@@ -54,7 +54,9 @@ export class GenerateFollowUpTool extends BaseTool<
       });
     }
 
-    if (leadRole === "elderly" || leadRole === "mixed_family") {
+    const mealPolicy = constraints.planSpecification?.mealPolicy;
+    const mealRequired = mealPolicy === undefined || mealPolicy === "required";
+    if (mealRequired && (leadRole === "elderly" || leadRole === "mixed_family")) {
       questions.push({
         id: "elderly_dietary",
         question: "老人有什么饮食忌口吗？",
@@ -68,7 +70,7 @@ export class GenerateFollowUpTool extends BaseTool<
       });
     }
 
-    if (group.preferences.dieting) {
+    if (mealRequired && group.preferences.dieting) {
       questions.push({
         id: "dieting_level",
         question: "减肥到什么程度？帮你筛合适的餐厅",

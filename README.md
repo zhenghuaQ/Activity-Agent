@@ -3,7 +3,7 @@
 **AI Activity Decision Agent** — 通过可持续补充的多轮对话，决策出合适的出行方案（景点 + 茶歇 + 餐厅）
 
 > **产品定位：核心竞争力是「一键决策」**——多维评分 + 可解释 + 个性化推荐。
-> 系统只生成决策方案，不执行下单、预订、取号、支付或配送等交易与履约动作；用户可自行在对应平台预订。
+> 活动规划只生成决策方案，不会自动预订或付款。仓库另有独立的本地模拟支付演示，使用虚构商户与内存账本，不接真实支付渠道。
 
 ---
 
@@ -36,7 +36,7 @@
 - **开放地点数据 Provider** — 支持内置 Mock/高德、社区 TypeScript Provider 和语言无关 HTTP Provider
 - **真正的多轮规划** — 自由文本补充与选择题追问并存，后续输入只覆盖明确修改的条件
 - **会话级短期记忆** — 对话、约束和方案版本持久化，关闭页面后可恢复并继续补充
-- **统计化 Eval** — Decision Agent 评测与 Runtime 回归分离，完整多轮任务达标率为主指标
+- **多套 Eval Harness** — Runtime 回归、OpenEvals、Pairwise、Judge、Stress、诊断、LangSmith 和独立支付模拟评测
 
 ## 项目架构
 
@@ -65,6 +65,8 @@ HTTP 层负责协议、SSE、限流和指标；业务请求先转换成协议无
 
 `ActivityPlanner` 负责活动方案的领域决策。Runtime Plan 描述执行步骤及依赖关系，与用户看到的活动 Plan（景点、茶歇、餐厅时间线）是不同概念；执行器当前按依赖串行推进，DAG 资源读写契约为后续受限并发留出边界。重规划调整搜索策略，不修改用户原始硬约束。
 
+支付演示作为独立领域，由 `PaymentService` 驱动模拟商户与补偿状态机；它不会由规划结果自动触发，也不能切换为真实支付。详见 [`src/payment/README.md`](src/payment/README.md)。
+
 ## 主要目录
 
 ```
@@ -80,9 +82,10 @@ Activity-Agent/
 │   ├── profile/           # 用户画像、分层和画像存储
 │   ├── conversation/      # 会话记忆、事件投影和 JSON 存储
 │   ├── server/            # Fastify Channel、REST/SSE、指标和 OpenAPI
-│   └── constraints/       # 饮食兼容性与方案完整性规则
+│   ├── constraints/       # 约束引擎、饮食兼容性与方案完整性规则
+│   └── payment/           # 与规划隔离的模拟支付服务、路由和 CLI 演示
 ├── web/                   # Vite + React 前端决策与监控看板
-├── eval/                  # Decision Eval 与 Runtime Regression
+├── eval/                  # Decision、Runtime、Judge、Pairwise、Stress、LangSmith 等评测
 ├── docs/                  # AgentEvent、Provider、Location 契约与设计说明
 ├── test/                  # Vitest 单元和集成测试
 └── scripts/               # 跨平台启动脚本
@@ -130,9 +133,20 @@ npm run dev:web            # 或用 concurrently 一键并行前后端
 # 方式三：CLI 交互式 Demo（终端输入自然语言，获取出行方案）
 npm run demo
 
-# Decision 评测与 Runtime 回归
+# Decision 评测（OpenEvals）与 Runtime 回归
 npm run eval:decision
 npm run eval:runtime
+
+# 其他评测入口
+npm run eval:pairwise
+npm run eval:judge
+npm run eval:stress
+npm run eval:diagnostics
+npm run eval:langsmith
+npm run eval:payment
+
+# 本地模拟支付演示（不会发生真实扣款）
+npm run demo:payment
 
 # 汇总兼容入口：Decision + Runtime Regression
 npm run eval

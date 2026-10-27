@@ -154,13 +154,13 @@ describe("追问交互闭环", () => {
 
   it("减脂回答影响约束，不清除原始忌口，且不再次生成问题", async () => {
     const constraints = parseIntent("带娃和减肥老婆出去玩");
-    constraints.group.preferences.dietaryRestrictions = ["不吃海鲜"];
+    constraints.group.preferences.dietaryRestrictions = ["免海鲜"];
     constraints.group.preferences.dieting = true;
     const q: FollowUpQuestion = { ...question, id: "dieting_level", options: [
       { value: "cheat_day", label: "放松", hint: "" }, { value: "strict", label: "严格", hint: "" }] };
     const applied = interpretFollowUpAnswers(constraints, [q], [{ questionId: q.id, selectedValues: ["cheat_day"] }]);
     const state = await stage2_followUp({ stage: "follow_up_questions", constraints, errors: [] }, applied);
-    expect(state.constraints?.group.preferences).toMatchObject({ dieting: false, dietaryRestrictions: ["不吃海鲜"] });
+    expect(state.constraints?.group.preferences).toMatchObject({ dieting: false, dietaryRestrictions: ["免海鲜"] });
     expect(state.followUpQuestions).toEqual([]);
   });
 

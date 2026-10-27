@@ -10,6 +10,7 @@
 // ============================================================
 
 import type { StructuredConstraints } from "../../spec/types.js";
+import { normalizeDietaryRestriction } from "../../spec/dietary.js";
 import type { ScoringWeights } from "../../spec/decision.js";
 import type {
   UserProfile,
@@ -82,12 +83,10 @@ export function applyProfileToConstraints(
       ? Math.min(requestDistance, seg.defaults.maxDistanceKm)
       : seg.defaults?.maxDistanceKm ?? constraints.distance.preferredMaxKm);
 
-  const dietary = Array.from(
-    new Set([
-      ...constraints.group.preferences.dietaryRestrictions,
-      ...(ov.dietaryRestrictions ?? []),
-    ])
-  );
+  const dietary = Array.from(new Set([
+    ...constraints.group.preferences.dietaryRestrictions,
+    ...(ov.dietaryRestrictions ?? []).map(normalizeDietaryRestriction).filter((value): value is NonNullable<typeof value> => value !== undefined),
+  ]));
   const cuisine =
     ov.preferredCuisine ?? constraints.group.preferences.preferredCuisine;
 

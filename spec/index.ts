@@ -4,6 +4,7 @@ export * from "./location.js";
 export * from "./agent.js";
 export * from "./agent-event.js";
 export * from "./agent-event-compat.js";
+export * from "./decision-trace.js";
 export * from "./follow-up.js";
 export * from "./conversation.js";
 export * from "./tools.js";

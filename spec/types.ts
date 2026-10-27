@@ -4,6 +4,8 @@
 // ============================================================
 
 import type { TransitEstimate } from "./transit.js";
+import type { DietaryRequirement } from "./dietary.js";
+import type { CandidateHardConstraintEvaluation, PlanCompletenessRequirements } from "./constraints.js";
 
 // ─── 场景与主导角色 ────────────────────────────────────────
 
@@ -72,8 +74,8 @@ export interface UserPreferences {
   dieting: boolean;
   /** 预算级别 */
   budget?: "low" | "medium" | "high";
-  /** 忌口/口味偏好（如：轻油盐、免辣、不吃海鲜） */
-  dietaryRestrictions: string[];
+  /** Canonical dietary requirements; never raw user phrases. */
+  dietaryRestrictions: DietaryRequirement[];
   /** 偏好的菜系（如：粤菜、日料） */
   preferredCuisine?: string[];
   /** 自动推断的餐饮需求 */
@@ -124,7 +126,7 @@ export interface FollowUpAnswer {
   patches: Partial<{
     dieting: boolean;
     leadRole: LeadRole;
-    dietaryRestrictions: string[];
+    dietaryRestrictions: DietaryRequirement[];
     preferredCuisine: string[];
     budget: "low" | "medium" | "high";
     extraHints: string[];
@@ -148,6 +150,19 @@ export interface DistanceConstraint {
   preferredMaxKm?: number;
 }
 
+/** Explicit user-requested Plan shape only; omitted fields are not user constraints. */
+export interface PlanSpecification {
+  activityCount?: number;
+  mealPolicy?: "required" | "optional" | "none";
+}
+
+/** Planner-resolved shape records whether a value came from the user or domain defaults. */
+export interface ResolvedPlanSpecification {
+  requested: PlanSpecification;
+  activityCount: { value: number; source: "user" | "domain_default" };
+  mealPolicy: { value: "required" | "optional" | "none"; source: "user" | "domain_default" };
+}
+
 /** 地理位置 */
 export interface GeoLocation {
   lat: number;
@@ -167,7 +182,10 @@ export interface StructuredConstraints {
   destination?: { city: string; district?: string };
   group: Group;
   timeWindow: TimeWindow;
+  /** Explicit user maximum total plan duration. Runtime defaults/soft targets are not stored here. */
+  hardMaxDurationMinutes?: number;
   distance: DistanceConstraint;
+  planSpecification?: PlanSpecification;
   extraHints: string[];
 }
 
@@ -254,6 +272,10 @@ export interface Restaurant extends Place {
   queueCount: number;          // 当前排队人数
   /** 是否支持老年/忌口定制 */
   dietaryOptions: boolean;
+  /** Explicit provider evidence of requirements this restaurant can satisfy. */
+  supportedDietaryRestrictions?: DietaryRequirement[];
+  /** Explicit provider evidence of requirements this restaurant cannot satisfy. */
+  unsupportedDietaryRestrictions?: DietaryRequirement[];
 }
 
 /** 配送商品 */
@@ -351,6 +373,9 @@ export interface PlanningState {
   /** Written once by ActivityPlanner after the final replan opportunity. Absent on runtime failure. */
   termination?: PlanningTermination;
   constraints?: StructuredConstraints;
+  /** Immutable run-local structural acceptance requirements; preserved across replan revisions. */
+  planCompletenessRequirements?: PlanCompletenessRequirements;
+  resolvedPlanSpecification?: ResolvedPlanSpecification;
   /** Runtime may expand discovery without changing the user's acceptance constraint. */
   searchPolicy?: {
     radiusKm: number;
@@ -363,6 +388,10 @@ export interface PlanningState {
   planRevision?: number;
   followUpQuestions?: FollowUpQuestion[];
   candidates?: PlanCandidate[];
+  /** Hard-constraint evidence for every candidate considered in this planning revision. */
+  candidateHardEvaluations?: CandidateHardConstraintEvaluation[];
+  /** Plans rejected by hard feasibility, retained for diagnostics and replan reasoning. */
+  rejectedCandidates?: CandidateHardConstraintEvaluation[];
   selectedPlan?: Plan;
   /** 🆕 M2 决策结果：帕累托多方案 + 置信度 + 兜底说明 */
   decision?: import("./decision.js").DecisionResult;

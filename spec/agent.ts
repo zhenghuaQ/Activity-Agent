@@ -14,6 +14,7 @@ import type { FollowUpAnswer, FollowUpQuestion, PlanningState } from "./types.js
 import type { LocationRequest, ResolvedLocation } from "./location.js";
 import type { RuntimePlan } from "../src/runtime/plan.js";
 import type { AgentEvent } from "./agent-event.js";
+import type { DecisionTrace } from "./decision-trace.js";
 
 // ─── 标识 ──────────────────────────────────────────────
 
@@ -263,6 +264,8 @@ export interface AgentState {
   runtimePlan?: RuntimePlan;
   /** 业务状态：领域规划过程（PlanningState 及其扩展） */
   planning: PlanningState;
+  /** Optional internal projection of Activity decision provenance; not part of normal response DTOs. */
+  decisionTrace?: DecisionTrace;
   /** 消息流（用户输入/Agent 产出/系统注记/工具返回） */
   messages: AgentMessage[];
   /** 工具调用记录（按调用顺序） */
@@ -271,6 +274,8 @@ export interface AgentState {
   trace: AgentEvent[];
   /** 最近一次候选/方案约束评估结果（Runtime 侧记录，不决定领域过滤策略） */
   constraintEvaluations?: import("../src/constraints/engine.js").ConstraintEvaluation[];
+  /** Candidate hard-feasibility evidence retained across replans for auditability. */
+  candidateHardEvaluationHistory?: import("./constraints.js").CandidateHardConstraintEvaluation[];
   /** 受控重规划计数，用于防止 Agent Loop 无限循环 */
   replanCount?: number;
   /** 本次 Run 最大允许重规划次数 */
@@ -305,6 +310,7 @@ export function createAgentState(
     toolCalls: [],
     trace: [],
     constraintEvaluations: [],
+    candidateHardEvaluationHistory: [],
     errors: [],
   };
 }

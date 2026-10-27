@@ -7,15 +7,19 @@ import { validateDecisionScenarios } from "./scenarios/validate.js";
 import { runConversationCase } from "./evaluators/conversation.js";
 import type { ConversationEvalResult } from "./types.js";
 import { bootstrapMean, pairedBootstrapDifference, wilsonInterval } from "../shared/statistics.js";
+import { DECISION_EVALUATOR_VERSION } from "./evaluator-version.js";
 
 /**
  * Decision Agent Evaluation V3 主入口。
  * Scenario 自带 environment/data fixture，避免 benchmark 与运行环境错配。
  */
-export async function runDecisionEval(): Promise<void> {
+export type DecisionCaseRunner = typeof runConversationCase;
+
+export async function runDecisionEval(runCase: DecisionCaseRunner = runConversationCase): Promise<void> {
   console.log("=".repeat(78));
   console.log("  Decision Agent Evaluation V3");
   console.log(`  Benchmark ${DECISION_BENCHMARK_VERSION} — Scenario-based multi-turn suite`);
+  console.log(`  Evaluator ${DECISION_EVALUATOR_VERSION}`);
   console.log("=".repeat(78));
   console.log();
 
@@ -23,8 +27,8 @@ export async function runDecisionEval(): Promise<void> {
   const stateless: ConversationEvalResult[] = [];
   const memory: ConversationEvalResult[] = [];
   for (const scenario of scenarios) {
-    const baselineResult = await runConversationCase(scenario, false);
-    const memoryResult = await runConversationCase(scenario, true);
+    const baselineResult = await runCase(scenario, false);
+    const memoryResult = await runCase(scenario, true);
     stateless.push(baselineResult);
     memory.push(memoryResult);
     console.log(
@@ -34,7 +38,7 @@ export async function runDecisionEval(): Promise<void> {
       + `task=${memoryResult.taskSuccess ? "yes" : "no"} `
       + `memory=${memoryResult.memoryErrors}/${memoryResult.memoryChecks} `
       + `hard=${memoryResult.hardConstraintViolations}/${memoryResult.hardConstraintChecks} `
-      + `preference=${memoryResult.preferenceMatches}/${memoryResult.preferenceChecks} `
+      + `recommendationPreference=${memoryResult.preferenceApplicable ? `${memoryResult.preferenceMatches}/${memoryResult.preferenceChecks}` : `N/A(${memoryResult.preferenceNotApplicableReason})`} `
       + `adaptation=${memoryResult.adaptationErrors}/${memoryResult.adaptationChecks} `
       + `latency=${memoryResult.durationMs}ms turns=${memoryResult.turns}`
       + (memoryResult.errors.length ? ` errors=${memoryResult.errors.join(",")}` : ""),
@@ -60,8 +64,11 @@ export async function runDecisionEval(): Promise<void> {
     memory.length,
   );
   const latency = bootstrapMean(memory.map((value) => value.durationMs));
-  const preference = bootstrapMean(memory.filter((value) => value.preferenceChecks > 0)
+  const preference = bootstrapMean(memory.filter((value) => value.preferenceApplicable)
     .map((value) => value.preferenceMatches / value.preferenceChecks));
+  const preferenceApplicableScenarios = memory.filter(value => value.preferenceApplicable);
+  const preferenceMatches = preferenceApplicableScenarios.reduce((sum, value) => sum + value.preferenceMatches, 0);
+  const preferenceChecks = preferenceApplicableScenarios.reduce((sum, value) => sum + value.preferenceChecks, 0);
   const latencyDelta = pairedBootstrapDifference(
     stateless.map((value) => value.durationMs),
     memory.map((value) => value.durationMs),
@@ -76,7 +83,7 @@ export async function runDecisionEval(): Promise<void> {
   console.log(`  Tasks with memory error    ${pct(memoryTaskRate.estimate)} (95% Wilson ${pct(memoryTaskRate.lower)}–${pct(memoryTaskRate.upper)}, raw=${memoryErrors}/${memoryChecks} checks)`);
   console.log(`  Tasks with hard violation  ${pct(hardTaskRate.estimate)} (95% Wilson ${pct(hardTaskRate.lower)}–${pct(hardTaskRate.upper)}, raw=${hardErrors}/${hardChecks} checks)`);
   console.log(`  Adaptation errors          ${adaptationErrors}/${adaptationChecks} checks`);
-  console.log(`  Auxiliary preference coverage ${pct(preference.estimate)} (task bootstrap 95% ${pct(preference.lower)}–${pct(preference.upper)})`);
+  console.log(`  Recommendation preference coverage ${preferenceMatches}/${preferenceChecks} items (${preferenceChecks ? pct(preferenceMatches / preferenceChecks) : "N/A"}; ${preferenceApplicableScenarios.length} applicable scenarios; task bootstrap 95% ${preferenceChecks ? `${pct(preference.lower)}–${pct(preference.upper)}` : "N/A"})`);
   console.log(`  Auxiliary latency mean     ${latency.estimate.toFixed(0)}ms (task bootstrap 95% ${latency.lower.toFixed(0)}–${latency.upper.toFixed(0)}ms)`);
   console.log(`  Paired latency Δ           ${latencyDelta.estimate.toFixed(0)}ms (95% task bootstrap ${latencyDelta.lower.toFixed(0)}–${latencyDelta.upper.toFixed(0)}ms)`);
   console.log("  Note: turns/checks are clustered within tasks; confidence intervals therefore use tasks, not individual turns, as independent samples.");

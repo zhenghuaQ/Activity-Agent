@@ -7,6 +7,7 @@
 
 import type { PlanCandidate, StructuredConstraints } from "../../spec/types.js";
 import type { ResolvedLocation } from "../../spec/location.js";
+import type { PlanCompletenessRequirements } from "../../spec/constraints.js";
 import type {
   DecisionResult,
   ScoringWeights,
@@ -31,6 +32,7 @@ export interface RunDecisionOptions {
   notes?: string[];
   /** Runtime 已解析的环境位置，用于情境（如天气）计算。 */
   environmentLocation?: ResolvedLocation;
+  planCompletenessRequirements?: PlanCompletenessRequirements;
 }
 
 /**
@@ -57,7 +59,7 @@ export async function runDecision(
     cand.plan.score = scorePlan({ plan: cand.plan, constraints, context, weights });
   }
 
-  const result = buildPareto(candidates, [...(opts.notes ?? []), ...weightNotes]);
+  const result = buildPareto(candidates, [...(opts.notes ?? []), ...weightNotes], constraints, opts.planCompletenessRequirements);
   if (result) {
     log.info(
       {
@@ -77,5 +79,10 @@ export async function runDecision(
 export { scorePlan } from "./score.js";
 export { buildContext, adjustWeights } from "./context.js";
 export { buildPareto } from "./pareto.js";
+export { compareScoredPlans } from "./pareto.js";
+export { getCanonicalPlanIdentity } from "./plan-identity.js";
+export { evaluatePlanDistancePreference, getPlanPreferenceDistanceKm } from "./distance-preference.js";
+export { evaluatePlanGroupSuitability } from "./group-suitability.js";
+export { buildPlanExplanation, explainNoFeasiblePlan, explainPlanningFailure } from "./explanation.js";
 export { explainPlan, compareAgainst } from "./explain.js";
 export { withRadiusEscalation, withSpatialRadiusEscalation } from "./fallback.js";

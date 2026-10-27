@@ -10,7 +10,11 @@ Decision Task Success 表示“是否完成 Scenario 要求的正确决策目标
 
 每个运行结果单独报告 `outcome`、`runtimeCompleted` 和 `planGenerated`。Outcome 区分 `feasible_plan`、`no_feasible_plan`、`invalid_plan`、`missed_feasible_plan` 和 `runtime_failure`。只有 `feasible_plan` 对应可行场景成功，只有 `no_feasible_plan` 对应不可行场景成功。不可行场景的 fixture 会在评测前按景点/餐厅候选、目的地、硬距离和硬饮食限制做必要可行性校验；正常无方案还要求决策步骤全部结束，且没有工具错误或 Runtime 错误。
 
-当前 benchmark 版本为 `decision-v3.0`，首批包含 12 个场景，覆盖情侣、家庭、儿童、老年人、朋友、独自出行、偏好修改、约束保留和无可行方案等情况。上海场景使用显式的 synthetic fixture，并通过每个场景独立的 Provider/Location Resolver 运行，不依赖真实地图服务。
+当前 benchmark 版本为 `decision-v3.1`，包含 12 个场景，覆盖情侣、家庭、儿童、老年人、朋友、独自出行、偏好修改、约束保留和无可行方案等情况。上海场景使用显式的 synthetic fixture，并通过每个场景独立的 Provider/Location Resolver 运行，不依赖真实地图服务。
+
+Deterministic evaluator semantics 使用独立版本 `decision-evaluator-v1.0`，与 benchmark version 分离。Preference coverage 主指标只评价最终 `selectedPlan`；Pareto 中的其它方案不能补齐推荐方案的偏好缺失。不存在 preference、正确 `no_feasible_plan`、`runtime_failure`、`missed_feasible_plan` 或没有最终推荐时，Preference coverage 为 not applicable 并排除在覆盖率分母之外。部分覆盖按已有 preference expectation 项计数（例如 2/3）；该指标不改变 taskSuccess 或 DecisionOutcome。
+
+v3.1 是一次 benchmark data migration：生产饮食约束要求具体兼容证据后，`elderly_dietary_retention` 的 synthetic `rest_005` 补充 `轻油盐`、`免海鲜` 支持；`dietary_restriction_update` 的 synthetic `rest_005` 补充 `轻油盐`、`免海鲜`、`免辣` 支持。用户 turns 和 expectations 未变；仅这两个场景的 fixture evidence 改变。该证据是 benchmark ground truth，不代表真实商家或地图 Provider 数据。
 
 Runtime Regression 是工程辅助评测，保留旧的 5-stage baseline 与 AgentRuntime 对照，用来发现 Runtime、ToolExecutor、Trace、生命周期和重规划相关回归。它不再代表 Decision Agent 的主 benchmark。
 
@@ -30,9 +34,15 @@ Runtime Regression 是工程辅助评测，保留旧的 5-stage baseline 与 Age
 
 ## 运行入口
 
+`eval:decision` 使用 OpenEvals `runMultiturnSimulation` 与固定 Scenario turns 驱动；`eval:decision:manual` 是迁移参考实现。两个 backend 共用相同的 Scenario、Runtime session 原语与 deterministic evaluator。12 个固定 Scenario 的一致性检查通过后，主入口切换至 scripted backend。
+
 ```bash
 # 主评测：Decision Agent Evaluation V3
 npm run eval:decision
+
+# Manual reference backend / explicit OpenEvals backend
+npm run eval:decision:manual
+npm run eval:openevals
 
 # 工程辅助：5-stage baseline vs AgentRuntime
 npm run eval:runtime

@@ -7,6 +7,7 @@
 
 import type { GeoLocation, Place } from "./types.js";
 import type { ProviderSource } from "./datasource.js";
+import type { DietaryRequirement } from "./dietary.js";
 
 export interface SearchSpatialConstraint {
   /** 本次搜索实际使用的中心点，由 Planner 决定。 */
@@ -29,6 +30,8 @@ export interface PlaceSearchIntent {
   requiredTags?: string[];
   preferredTags?: string[];
   excludedTags?: string[];
+  /** Exact dietary requirements passed as retrieval hints; hard validation remains in ConstraintEngine. */
+  dietaryRequirements?: DietaryRequirement[];
   filters?: PlaceSearchFilters;
 }
 

@@ -42,7 +42,9 @@ import { evaluateAgentState } from "../runtime/evaluator.js";
 import { applyReplanPatch, decideReplan } from "../runtime/replanner.js";
 import { throwIfAborted } from "../runtime/abort.js";
 import { AgentRun } from "../runtime/agent-run.js";
-import { constraintEngine } from "../constraints/engine.js";
+import { evaluatePlanHardConstraints } from "../constraints/engine.js";
+import { buildEffectivePlanCompletenessRequirements } from "../constraints/plan-completeness.js";
+import { explainPlanningFailure } from "../decision/explanation.js";
 import {
   stage1_parseIntent,
   stage2_followUp,
@@ -54,6 +56,10 @@ import type { PipelineOptions, PlanResult } from "./engine.js";
 import { interpretFollowUpAnswers } from "./follow-up.js";
 import { mergeTurnConstraints } from "../conversation/memory.js";
 import { createInitialSearchPolicy } from "./search-policy.js";
+import { createDecisionTrace } from "../../spec/decision-trace.js";
+import { finalizeDecisionTrace, projectDecisionConstraints, recordFallbackAttempt, recordFinalAcceptance, recordGeneratedCandidates, recordHardFeasibilityFromCandidates, recordRecommendedPlan, recordScoring } from "../decision/trace.js";
+import { getObjectiveRepresentativeScores } from "../decision/pareto.js";
+import { buildActivityPlanTemplate, resolvePlanSpecification } from "./plan-composition.js";
 
 export interface ActivityPlannerOptions {
   maxReplans?: number;
@@ -163,6 +169,25 @@ function finishRun(
   };
 }
 
+/** Select the next already-ranked alternative if a final guard detects a later mutation. */
+function selectAcceptedAlternative(state: PlanningState): boolean {
+  if (!state.selectedPlan || !state.constraints || !state.decision) return false;
+  const currentId = state.selectedPlan.id;
+  const accepted = state.decision.pareto
+    .filter((candidate) => candidate.plan.id !== currentId)
+    .find((candidate) => evaluatePlanHardConstraints(candidate.plan, state.constraints!, state.planCompletenessRequirements).passed);
+  if (!accepted) return false;
+
+  state.decision = {
+    ...state.decision,
+    recommended: accepted,
+    pareto: state.decision.pareto.filter((candidate) =>
+      evaluatePlanHardConstraints(candidate.plan, state.constraints!, state.planCompletenessRequirements).passed),
+  };
+  state.selectedPlan = accepted.plan;
+  return true;
+}
+
 /**
  * ActivityPlanner 是 Activity 领域唯一的业务编排器。
  * Runtime 负责“何时运行”；这里负责“Activity 任务如何规划”。
@@ -185,6 +210,8 @@ export class ActivityPlanner {
     const rawText = agentState.input.rawText;
     const parseFn = opts.parseFn as ((text: string) => StructuredConstraints) | undefined;
     let state: PlanningState = agentState.planning;
+    const trace = opts.captureDecisionTrace === false ? undefined : createDecisionTrace();
+    agentState.decisionTrace = trace;
 
     run.transition("running", {
       reason: "planner_started",
@@ -231,6 +258,7 @@ export class ActivityPlanner {
             return current;
           }
           current.environment.location = response.data;
+          if (trace) trace.environment = { locationResolved: true, locationSource: response.data.source };
           return current;
         },
         intent_parsing: async (current: AgentState) => {
@@ -247,6 +275,7 @@ export class ActivityPlanner {
           planning.planRevision ??= 0;
           current.planning = planning;
           agentState.planning = planning;
+          if (trace && planning.constraints) trace.constraints = projectDecisionConstraints(planning.constraints);
           return current;
         },
         follow_up_questions: async (current: AgentState) => {
@@ -265,6 +294,19 @@ export class ActivityPlanner {
             const answers = interpretFollowUpAnswers(planning.constraints, questions, selections);
             current.messages.push(inboundFollowUpAnswer(answers, current.runId));
             planning = await stage2_followUp(planning, answers, toolExecutor);
+          }
+          if (planning.constraints) {
+            planning.resolvedPlanSpecification = resolvePlanSpecification(planning.constraints.planSpecification);
+            const activeTemplate = buildActivityPlanTemplate(planning.resolvedPlanSpecification);
+            planning.planCompletenessRequirements = buildEffectivePlanCompletenessRequirements(
+              activeTemplate,
+              planning.constraints,
+            );
+            if (trace) trace.planStructure = {
+              requested: structuredClone(planning.resolvedPlanSpecification.requested),
+              resolved: structuredClone(planning.resolvedPlanSpecification),
+              templateId: activeTemplate.id,
+            };
           }
           current.planning = planning;
           agentState.planning = planning;
@@ -287,6 +329,7 @@ export class ActivityPlanner {
             toolExecutor,
             { userLocation: current.environment.location },
           );
+          if (trace) recordGeneratedCandidates(trace, planning.planRevision ?? 0, planning.candidates ?? []);
           current.planning = planning;
           agentState.planning = planning;
           return current;
@@ -294,11 +337,15 @@ export class ActivityPlanner {
         feasibility_check: async (current: AgentState) => {
           throwIfAborted(opts.signal);
           const planning = await stage4_feasibilityCheck(current.planning, toolExecutor);
-          const constraintEvaluations = (planning.candidates ?? []).map((candidate) =>
-            constraintEngine.evaluatePlan(candidate.plan, planning.constraints!),
-          );
+          if (trace) recordHardFeasibilityFromCandidates(trace, current.planning.planRevision ?? 0, current.planning.candidates ?? [], planning.candidateHardEvaluations ?? []);
+          const candidateEvaluations = planning.candidateHardEvaluations ?? [];
+          const constraintEvaluations = candidateEvaluations.map(({ passed, checks }) => ({ passed, checks }));
           current.planning = planning;
           current.constraintEvaluations = constraintEvaluations;
+          current.candidateHardEvaluationHistory = [
+            ...(current.candidateHardEvaluationHistory ?? []),
+            ...candidateEvaluations.map((evaluation) => structuredClone(evaluation)),
+          ];
           agentState.planning = planning;
           agentState.constraintEvaluations = constraintEvaluations;
           return current;
@@ -310,6 +357,12 @@ export class ActivityPlanner {
             weather: opts.weather,
             date: opts.date,
             environmentLocation: current.environment.location,
+            onDecisionTrace: ({ scoredCandidates, decision }) => {
+              if (!trace) return;
+              recordScoring(trace, current.planning.planRevision ?? 0, scoredCandidates,
+                getObjectiveRepresentativeScores(decision).map(item => ({ objective: item.objective, candidate: item.plan, objectiveScore: item.score })));
+              recordRecommendedPlan(trace, decision.recommended.plan);
+            },
           });
           current.planning = planning;
           agentState.planning = planning;
@@ -345,7 +398,11 @@ export class ActivityPlanner {
 
       for (let attempt = 0; attempt < (agentState.maxReplans ?? 0); attempt += 1) {
         throwIfAborted(opts.signal);
-        const evaluation = evaluateAgentState(agentState);
+        let evaluation = evaluateAgentState(agentState);
+        if (!evaluation.passed && selectAcceptedAlternative(state)) {
+          if (trace) recordFallbackAttempt(trace, evaluation.failures.map(failure => failure.rule));
+          evaluation = evaluateAgentState(agentState);
+        }
         agentState.constraintEvaluations = evaluation.evaluation ? [evaluation.evaluation] : [];
         run.emit({
           type: "evaluation",
@@ -357,7 +414,14 @@ export class ActivityPlanner {
 
         if (evaluation.passed) break;
 
-        const decision = decideReplan(agentState, evaluation.failures);
+        const failures = evaluation.failures.some((failure) => failure.rule !== "missing_final_plan")
+          ? evaluation.failures
+          : state.rejectedCandidates?.flatMap((candidate) => candidate.hardFailures) ?? evaluation.failures;
+        const hasInfrastructureFailure = agentState.errors.length > 0
+          || agentState.toolCalls.some((call) => call.status === "error");
+        const decision = hasInfrastructureFailure
+          ? { shouldReplan: false, reason: "INFRASTRUCTURE_FAILURE" }
+          : decideReplan(agentState, failures);
         if (!decision.shouldReplan || !decision.nextPlan) break;
 
         agentState.replanCount = (agentState.replanCount ?? 0) + 1;
@@ -405,7 +469,11 @@ export class ActivityPlanner {
         state = executedState.planning;
       }
 
-      const finalEvaluation = evaluateAgentState(agentState);
+      let finalEvaluation = evaluateAgentState(agentState);
+      if (!finalEvaluation.passed && selectAcceptedAlternative(state)) {
+        if (trace) recordFallbackAttempt(trace, finalEvaluation.failures.map(failure => failure.rule));
+        finalEvaluation = evaluateAgentState(agentState);
+      }
       agentState.constraintEvaluations = finalEvaluation.evaluation ? [finalEvaluation.evaluation] : [];
 
       // A termination is a final business conclusion, not an intermediate stage result.
@@ -416,15 +484,29 @@ export class ActivityPlanner {
         && agentState.currentStep === "fine_scheduling"
         && agentState.errors.length === 0
         && !agentState.toolCalls.some((call) => call.status === "error")) {
-        const termination: PlanningTermination | undefined = state.selectedPlan
+        const termination: PlanningTermination | undefined = state.selectedPlan && finalEvaluation.passed
           ? { reason: "plan_selected", code: "PLAN_SELECTED" }
-          : !state.decision
+          : !state.decision || !finalEvaluation.passed
             ? {
                 reason: "no_feasible_plan",
-                code: state.candidates?.length ? "NO_SELECTABLE_PLAN" : "NO_CANDIDATES",
+                code: state.candidates?.length || state.rejectedCandidates?.length ? "NO_SELECTABLE_PLAN" : "NO_CANDIDATES",
               }
             : undefined;
         if (termination) state.termination = termination;
+      }
+
+      if (trace) {
+        const checks = finalEvaluation.evaluation?.checks ?? finalEvaluation.failures;
+        recordFinalAcceptance(trace, {
+          selectedPlan: finalEvaluation.passed ? state.selectedPlan : undefined,
+          passed: finalEvaluation.passed,
+          checks,
+          failureCodes: finalEvaluation.failures.map(failure => failure.rule),
+          explanation: finalEvaluation.passed ? state.selectedPlan?.explanation?.evidence : undefined,
+        });
+        finalizeDecisionTrace(trace, state.termination, finalEvaluation.passed || state.termination?.reason === "no_feasible_plan"
+          ? undefined
+          : { kind: "runtime_failure" });
       }
 
       if (state.selectedPlan && finalEvaluation.passed) {
@@ -440,10 +522,11 @@ export class ActivityPlanner {
         );
       }
 
-      const detail = state.errors.find(error => error.startsWith("目的地不可用")) ?? state.errors.at(-1);
-      const message = detail
-        ? `未能生成满足运行约束的可行方案：${detail}`
-        : "未能生成满足运行约束的可行方案";
+      if (!finalEvaluation.passed) {
+        state.selectedPlan = undefined;
+        state.decision = undefined;
+      }
+      const message = explainPlanningFailure(state.termination?.reason, state.constraints, state.rejectedCandidates ?? []);
       return finishRun(run, "failed", message, state.decision, {
         reason: message,
       });
@@ -454,6 +537,7 @@ export class ActivityPlanner {
         ? `运行已取消: ${opts.signal?.reason instanceof Error ? opts.signal.reason.message : String(opts.signal?.reason ?? "user_cancelled")}`
         : `规划异常: ${err instanceof Error ? err.message : String(err)}`;
       agentState.errors.push(message);
+      if (trace) finalizeDecisionTrace(trace, undefined, { kind: cancelled ? "cancelled" : "runtime_failure" });
       run.emit({ type: "error", payload: { message } });
       return finishRun(
         run,

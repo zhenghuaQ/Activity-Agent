@@ -30,7 +30,14 @@ const confidence = (v: unknown) => finite(v) && v >= 0 && v <= 1;
 const score = (v: unknown) => record(v) && finite(v.total) && v.total >= 0 && v.total <= 100 && confidence(v.confidence)
   && Array.isArray(v.dimensions) && v.dimensions.every(d => record(d) && oneOf(d.dimension, dimensions)
     && finite(d.score) && finite(d.weight) && finite(d.weighted) && text(d.reason));
-const explanation = (v: unknown) => record(v) && strings(v.highlights) && strings(v.tradeoffs) && optional(v.whyNotOthers, strings);
+const explanationEvidenceCodes = ["requested_local_feature_matched", "preferred_cuisine_matched", "preferred_distance_satisfied", "group_suitability_matched", "dietary_requirement_verified", "hard_distance_satisfied", "hard_duration_satisfied", "plan_local_feature_present", "selected_plan_feasible"];
+const explanationEvidenceSources = ["preference", "hard_constraint", "plan_attribute"];
+const explanationEvidence = (v: unknown) => record(v)
+  && oneOf(v.code, explanationEvidenceCodes)
+  && oneOf(v.source, explanationEvidenceSources)
+  && record(v.data);
+const explanation = (v: unknown) => record(v) && strings(v.highlights) && strings(v.tradeoffs)
+  && optional(v.whyNotOthers, strings) && optional(v.evidence, value => Array.isArray(value) && value.every(explanationEvidence));
 
 function plan(v: unknown): boolean {
   if (!record(v) || !text(v.id) || !text(v.summary) || !finite(v.totalDurationHours)

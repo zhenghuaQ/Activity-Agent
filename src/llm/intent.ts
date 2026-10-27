@@ -12,6 +12,7 @@ import { getLLMClient, getLLMConfig } from "./config.js";
 import { parseIntent as mockParse } from "../intent/parser.js";
 import { childLogger } from "../core/logger.js";
 import { throwIfAborted } from "../runtime/abort.js";
+import { CANONICAL_DIETARY_REQUIREMENTS, normalizeDietaryRestriction } from "../../spec/dietary.js";
 
 const log = childLogger("llm:intent");
 
@@ -67,8 +68,8 @@ const INTENT_SCHEMA = {
       dieting: { type: "boolean", description: "是否有人正在减肥/控制饮食" },
       dietaryRestrictions: {
         type: "array",
-        items: { type: "string" },
-        description: "忌口偏好，如：轻油盐、免辣、素食、低卡、免海鲜",
+        items: { type: "string", enum: [...CANONICAL_DIETARY_REQUIREMENTS] },
+        description: "只输出规范忌口标识：免海鲜、免辣、轻油盐、素食、低卡、轻食、软食；将用户同义表达映射到这些标识",
       },
       preferredCuisine: {
         type: "array",
@@ -93,6 +94,12 @@ const INTENT_SCHEMA = {
         maximum: 50,
         description: "仅当用户明确表达不可超过时填写的硬距离上限（公里）",
       },
+      hardMaxDurationMinutes: {
+        type: "number",
+        minimum: 1,
+        maximum: 720,
+        description: "仅当用户明确说只有/最多/不超过某时长时填写的总行程硬上限（分钟）；默认时长、约/左右等模糊目标不填写",
+      },
       preferredMaxDistanceKm: {
         type: "number",
         minimum: 1,
@@ -103,6 +110,15 @@ const INTENT_SCHEMA = {
         type: "array",
         items: { type: "string" },
         description: "额外提示词，如：拍照打卡、浪漫、亲子、展览、小吃、蛋糕、鲜花",
+      },
+      planSpecification: {
+        type: "object",
+        description: "仅当用户明确要求具体景点/地点数量或明确表达用餐结构时填写；不可从轻松、丰富等偏好推断。",
+        properties: {
+          activityCount: { type: "integer", minimum: 1, maximum: 20, description: "用户明确要求的景点/游玩地点精确数量；未明确则省略" },
+          mealPolicy: { type: "string", enum: ["required", "optional", "none"], description: "仅按明确表达：要吃饭=required，可吃可不吃=optional，不安排饭/餐厅=none；未提及省略" },
+        },
+        additionalProperties: false,
       },
     },
     required: ["scenario", "leadRole", "totalPeople", "startTime", "durationHours"],
@@ -126,9 +142,11 @@ interface LLMIntentResult {
   budget?: "low" | "medium" | "high";
   startTime: string;
   durationHours: number;
+  hardMaxDurationMinutes?: number;
   hardMaxDistanceKm?: number;
   preferredMaxDistanceKm?: number;
   extraHints: string[];
+  planSpecification?: { activityCount?: number; mealPolicy?: "required" | "optional" | "none" };
 }
 
 /**
@@ -157,6 +175,7 @@ export async function parseIntentWithLLM(
           content: `你是AI出行决策助手的意图解析模块。从用户输入中提取结构化约束。
 规则：
 - 默认下午出发(startTime="14:00")，默认5小时(durationHours=5)
+- 仅在用户明确表达“只有/最多/不超过N小时”等硬上限时填写 hardMaxDurationMinutes；“N小时左右/大约N小时”及默认时长不得填写
 - 没有距离需求时不要填写 hardMaxDistanceKm 或 preferredMaxDistanceKm
 - hardMaxDistanceKm 只用于“5公里以内/不超过5公里/最多5公里”等明确硬上限
 - preferredMaxDistanceKm 用于“最好5公里左右/尽量近/附近”等软偏好
@@ -166,7 +185,9 @@ export async function parseIntentWithLLM(
 - "孩子"/"小孩"+"老婆" → scenario=family（不是couple）, leadRole=kids
 - "爸妈"/"父母"/"老人" → 有senior, leadRole=elderly 或 mixed_family
 - "减肥"/"轻食"/"低卡" → dieting=true
-- "拍照"/"好看" → extraHints: ["拍照打卡"]`,
+- 将具体忌口按语义映射为规范标识：不能吃/不要海鲜→免海鲜，不能吃辣/不要辣→免辣；不要把菜系偏好当成忌口
+- "拍照"/"好看" → extraHints: ["拍照打卡"]
+- planSpecification 只记录用户明确提出的结构：明确数量如“两个景点”填写 activityCount=2；明确“不吃饭/不需要餐厅”填 mealPolicy=none；“吃不吃都行”填 optional；“安排吃饭”填 required。未明确时省略，不得从“轻松/丰富/不要太赶”等推断。`,
         },
         { role: "user", content: rawText },
       ],
@@ -195,7 +216,12 @@ export async function parseIntentWithLLM(
       "LLM 解析成功"
     );
 
-    return llmResultToConstraints(parsed);
+    const constraints = llmResultToConstraints(parsed);
+    // Keep explicit structure extraction deterministic and contract-identical to the local parser.
+    const explicitStructure = mockParse(rawText).planSpecification;
+    if (explicitStructure) constraints.planSpecification = explicitStructure;
+    else delete constraints.planSpecification;
+    return constraints;
   } catch (err) {
     throwIfAborted(signal);
     log.warn({ err: err instanceof Error ? err.message : String(err) }, "LLM 解析异常，降级 Mock");
@@ -218,6 +244,11 @@ function llmResultToConstraints(r: LLMIntentResult): StructuredConstraints {
   const endH = Math.floor(endMin / 60) % 24;
   const endM = endMin % 60;
   const end = `${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}`;
+  const dietaryRestrictions = [...new Set(r.dietaryRestrictions.map(value => {
+    const normalized = normalizeDietaryRestriction(value);
+    if (!normalized) throw new Error("unsupported_dietary_requirement");
+    return normalized;
+  }))];
 
   return {
     ...(r.destinationCity?.trim() ? { destination: { city: r.destinationCity.trim() } } : {}),
@@ -239,14 +270,14 @@ function llmResultToConstraints(r: LLMIntentResult): StructuredConstraints {
       preferences: {
         dieting: r.dieting || false,
         budget: r.budget,
-        dietaryRestrictions: r.dietaryRestrictions || [],
+        dietaryRestrictions,
         preferredCuisine: r.preferredCuisine,
         inferredDietary: {
-          lightDiet: (r.dietaryRestrictions || []).includes("轻油盐") || !!r.hasSenior || !!r.dieting,
+          lightDiet: dietaryRestrictions.includes("轻油盐") || !!r.hasSenior || !!r.dieting,
           kidsFriendly: !!r.hasYoungChild,
-          lowCalorie: !!r.dieting || (r.dietaryRestrictions || []).includes("低卡"),
-          softFood: (r.seniorCount || 0) > 1 || (r.dietaryRestrictions || []).includes("软食"),
-          restrictions: r.dietaryRestrictions || [],
+          lowCalorie: !!r.dieting || dietaryRestrictions.includes("低卡"),
+          softFood: (r.seniorCount || 0) > 1 || dietaryRestrictions.includes("软食"),
+          restrictions: dietaryRestrictions,
         },
       },
     },
@@ -259,8 +290,20 @@ function llmResultToConstraints(r: LLMIntentResult): StructuredConstraints {
       ...(r.hardMaxDistanceKm !== undefined ? { hardMaxKm: clampNum(r.hardMaxDistanceKm, 1, 50, 25) } : {}),
       ...(r.preferredMaxDistanceKm !== undefined ? { preferredMaxKm: clampNum(r.preferredMaxDistanceKm, 1, 50, 25) } : {}),
     },
+    ...(isValidPlanSpecification(r.planSpecification) ? { planSpecification: { ...r.planSpecification } } : {}),
+    ...(r.hardMaxDurationMinutes !== undefined
+      ? { hardMaxDurationMinutes: Math.round(clampNum(r.hardMaxDurationMinutes, 1, 720, 1)) }
+      : {}),
     extraHints: r.extraHints || [],
   };
+}
+
+function isValidPlanSpecification(value: LLMIntentResult["planSpecification"]): value is NonNullable<LLMIntentResult["planSpecification"]> {
+  if (!value || typeof value !== "object") return false;
+  const activityCount = value.activityCount;
+  const mealPolicy = value.mealPolicy;
+  return (activityCount === undefined || (Number.isInteger(activityCount) && activityCount >= 1 && activityCount <= 20))
+    && (mealPolicy === undefined || mealPolicy === "required" || mealPolicy === "optional" || mealPolicy === "none");
 }
 
 function timeStrToMin(t: string): number {

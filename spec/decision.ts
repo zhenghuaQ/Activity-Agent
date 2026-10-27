@@ -103,6 +103,27 @@ export interface PlanExplanation {
   tradeoffs: string[];
   /** 为何不选其它候选（多方案对比时填充） */
   whyNotOthers?: string[];
+  /** Structured facts supporting user-facing explanation; absent on legacy payloads. */
+  evidence?: DecisionExplanationEvidence[];
+}
+
+export type DecisionExplanationEvidenceCode =
+  | "requested_local_feature_matched"
+  | "preferred_cuisine_matched"
+  | "preferred_distance_satisfied"
+  | "group_suitability_matched"
+  | "dietary_requirement_verified"
+  | "hard_distance_satisfied"
+  | "hard_duration_satisfied"
+  | "plan_local_feature_present"
+  | "selected_plan_feasible";
+
+export type DecisionExplanationEvidenceSource = "preference" | "hard_constraint" | "plan_attribute";
+
+export interface DecisionExplanationEvidence {
+  code: DecisionExplanationEvidenceCode;
+  source: DecisionExplanationEvidenceSource;
+  data: Record<string, string | number | boolean | string[]>;
 }
 
 // ─── 情境（context）──────────────────────────────────────

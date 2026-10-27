@@ -1,9 +1,9 @@
-import { runDecisionEval } from "./decision/runner.js";
+import { runOpenEvalsDecisionEval } from "./openevals/runner.js";
 import { runRuntimeRegression } from "./runtime/runner.js";
 
 /** Compatibility entry: primary Decision Eval first, Runtime Regression second. */
 async function main(): Promise<void> {
-  await runDecisionEval();
+  await runOpenEvalsDecisionEval();
   console.log();
   await runRuntimeRegression();
 }

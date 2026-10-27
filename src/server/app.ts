@@ -22,6 +22,7 @@ import { getRuntimeFlags } from "./flags.js";
 import { checkRateLimit } from "./ratelimit.js";
 import { registerAgentEventLogging } from "../observability/subscribers/logging-agent-event-subscriber.js";
 import { SseWriter } from "./sse-writer.js";
+import { buildPaymentRoutes } from "../payment/routes.js";
 
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 120);
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
@@ -88,6 +89,7 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
 
   // ── 绑定 Channel 路由表 ──
   registerRoutes(app, buildChannelRoutes(), opts);
+  registerRoutes(app, buildPaymentRoutes(), opts);
 
   return app;
 }

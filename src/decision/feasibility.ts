@@ -5,8 +5,9 @@
 // ============================================================
 
 import type { Plan, PlanCandidate } from "../../spec/types.js";
-import { checkTimeConflict, checkPlanCompleteness, timeToMinutes } from "../../spec/constraints.js";
+import { checkTimeConflict, timeToMinutes } from "../../spec/constraints.js";
 import { transitScorePenalty, checkTransitFeasible } from "../../spec/transit.js";
+import { buildDefaultActivityPlanCompletenessRequirements, evaluatePlanCompleteness } from "../constraints/plan-completeness.js";
 
 /** 可行性总评分 (0-100)，综合时间冲突、方案完整性、通勤耗时 */
 export function calcFeasibilityScore(plan: Plan): number {
@@ -20,7 +21,7 @@ export function calcFeasibilityScore(plan: Plan): number {
   }
 
   // 2. 方案完整性扣分
-  for (const c of checkPlanCompleteness(plan)) {
+  for (const c of evaluatePlanCompleteness(plan, buildDefaultActivityPlanCompletenessRequirements(plan.leadRole)).failures) {
     if (!c.passed) score -= 20;
   }
 

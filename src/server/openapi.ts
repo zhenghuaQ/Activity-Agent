@@ -12,10 +12,57 @@ export function getOpenApiSpec(version: string) {
       title: "AI出行决策 API",
       version,
       description:
-        "AI 智能出行/活动决策引擎。仅决策，不做任何下单/支付/履约。支持同步决策与 SSE 流式决策。",
+        "AI 智能出行/活动决策引擎。支持同步决策与 SSE 流式决策，另提供独立的模拟商户支付演示；不进行真实预订或扣款。",
     },
     servers: [{ url: "/", description: "当前服务" }],
     paths: {
+      "/api/payments/catalog": {
+        get: { summary: "模拟商户固定商品目录（无真实扣款）", responses: { "200": { description: "mode=mock，products 为服务端报价数组" } } },
+      },
+      "/api/payments": {
+        post: {
+          summary: "创建模拟付款意图，尚未付款",
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", additionalProperties: false, required: ["sessionId", "productId", "request"],
+            properties: { sessionId: { type: "string" }, planId: { type: "string" },
+              productId: { type: "string", enum: ["restaurant-demo", "hotel-demo"] }, request: { type: "string" } },
+          } } } },
+          responses: { "200": { description: "{ intent, accessToken }；需先展示报价，再由用户单独确认" }, "400": { description: "无效请求/非目录商品" } },
+        },
+      },
+      "/api/payments/{id}": {
+        get: {
+          summary: "查询模拟支付状态与凭证",
+          security: [{ PaymentCapability: [] }],
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "PaymentIntent，包含报价、状态、事件和可选凭证" }, "404": { description: "不存在或无访问凭据" } },
+        },
+      },
+      "/api/payments/{id}/confirm": {
+        post: {
+          summary: "用户明确确认原报价后执行模拟付款；同一 intent 幂等",
+          security: [{ PaymentCapability: [] }],
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: { required: true, content: { "application/json": { schema: {
+            type: "object", required: ["accepted", "confirmationToken", "amountMinor", "currency", "merchantId", "quoteVersion"],
+            properties: {
+              accepted: { type: "boolean", enum: [true] }, confirmationToken: { type: "string" },
+              amountMinor: { type: "integer", minimum: 1, description: "原报价金额（分）" },
+              currency: { type: "string", enum: ["CNY"] }, merchantId: { type: "string" }, quoteVersion: { type: "integer", enum: [1] },
+            },
+          } } } },
+          responses: { "200": { description: "状态为 succeeded / rolled_back / manual_review；HTTP 200 不等于支付成功" },
+            "400": { description: "缺少明确确认或报价不匹配" }, "404": { description: "不存在或无访问凭据" }, "409": { description: "过期、取消或被风控拦截" } },
+        },
+      },
+      "/api/payments/{id}/cancel": {
+        post: {
+          summary: "取消尚未执行的模拟支付",
+          security: [{ PaymentCapability: [] }],
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "cancelled" }, "404": { description: "不存在或无访问凭据" }, "409": { description: "当前状态不可取消" } },
+        },
+      },
       "/health": {
         get: {
           summary: "健康检查",
@@ -139,6 +186,9 @@ export function getOpenApiSpec(version: string) {
       },
     },
     components: {
+      securitySchemes: {
+        PaymentCapability: { type: "http", scheme: "bearer", description: "创建模拟 intent 时返回的 accessToken；不是用户登录认证" },
+      },
       schemas: {
         DecideRequest: {
           type: "object",

@@ -32,6 +32,11 @@ export interface ConversationEvalResult {
   hardConstraintViolations: number;
   preferenceChecks: number;
   preferenceMatches: number;
+  preferenceApplicable: boolean;
+  preferenceCoverage: number | null;
+  preferenceDetails: Array<{ preference: string; satisfied: boolean }>;
+  preferenceNotApplicableReason?: "no_preferences" | "no_feasible_plan" | "runtime_failure" | "missed_feasible_plan" | "no_recommendation";
+  evaluatorVersion: typeof import("./evaluator-version.js").DECISION_EVALUATOR_VERSION;
   adaptationChecks: number;
   adaptationErrors: number;
   durationMs: number;

@@ -1,5 +1,6 @@
-import type { DecisionScenario } from "./schema.js";
+import type { DecisionScenario, DecisionScenarioExecutionInput } from "./schema.js";
 import { haversineKm, roundKm } from "../../../src/core/geo.js";
+import { evaluateRestaurantDietaryCompatibility } from "../../../src/constraints/dietary.js";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`invalid_decision_scenario:${message}`);
@@ -25,18 +26,23 @@ export function scenarioHasFeasibleFixturePlan(scenario: DecisionScenario): bool
   const restaurants = data.restaurants.filter(place =>
     (!destination || place.location.city.includes(destination) || destination.includes(place.location.city))
     && (maxDistanceKm === undefined || roundKm(haversineKm(origin, place.location)) <= maxDistanceKm)
-    && (!hard.dietaryRestrictions?.length || place.dietaryOptions));
+    && (!hard.dietaryRestrictions?.length || evaluateRestaurantDietaryCompatibility(place, hard.dietaryRestrictions).passed));
   return attractions.length > 0 && restaurants.length > 0;
 }
 
-export function validateDecisionScenario(scenario: DecisionScenario): DecisionScenario {
+/** Validates agent-visible fields without requiring or inspecting ground truth. */
+export function validateDecisionScenarioExecutionInput(
+  scenario: DecisionScenarioExecutionInput,
+): DecisionScenarioExecutionInput {
   assert(Boolean(scenario.id.trim()), "id_required");
   assert(scenario.domain === "activity", `${scenario.id}:domain`);
   assert(scenario.turns.length >= 2, `${scenario.id}:turns_minimum`);
   assert(Boolean(scenario.environment.location), `${scenario.id}:location_required`);
   assert(scenario.tags.length > 0, `${scenario.id}:tags_required`);
-  assert(scenario.expectations.expectedFeasibility === "feasible"
-    || scenario.expectations.expectedFeasibility === "infeasible", `${scenario.id}:expected_feasibility_required`);
+  const resolved = scenario.environment.location;
+  assert(["coords", "geocode", "ip", "default"].includes(resolved.source), `${scenario.id}:location_source`);
+  assert(validCoordinate(resolved.location.lat, -90, 90), `${scenario.id}:invalid_origin_lat`);
+  assert(validCoordinate(resolved.location.lng, -180, 180), `${scenario.id}:invalid_origin_lng`);
 
   const fixture = scenario.environment.data;
   const places = [...fixture.attractions, ...fixture.restaurants, ...fixture.breakPlaces];
@@ -44,6 +50,7 @@ export function validateDecisionScenario(scenario: DecisionScenario): DecisionSc
   const ids = places.map((place) => place.id);
   assert(new Set(ids).size === ids.length, `${scenario.id}:duplicate_place_id`);
   for (const place of places) {
+    assert(Boolean(place.id) && Boolean(place.name), `${scenario.id}:invalid_place:${place.id}`);
     assert(validCoordinate(place.location.lat, -90, 90), `${scenario.id}:invalid_lat:${place.id}`);
     assert(validCoordinate(place.location.lng, -180, 180), `${scenario.id}:invalid_lng:${place.id}`);
   }
@@ -51,6 +58,16 @@ export function validateDecisionScenario(scenario: DecisionScenario): DecisionSc
     assert(validCoordinate(center.lat, -90, 90), `${scenario.id}:invalid_destination_lat:${city}`);
     assert(validCoordinate(center.lng, -180, 180), `${scenario.id}:invalid_destination_lng:${city}`);
   }
+  return scenario;
+}
+
+export function validateDecisionScenario(scenario: DecisionScenario): DecisionScenario {
+  validateDecisionScenarioExecutionInput(scenario);
+  assert(scenario.expectations.expectedFeasibility === "feasible"
+    || scenario.expectations.expectedFeasibility === "infeasible", `${scenario.id}:expected_feasibility_required`);
+
+  const fixture = scenario.environment.data;
+  const places = [...fixture.attractions, ...fixture.restaurants, ...fixture.breakPlaces];
 
   const hard = scenario.expectations.hardConstraints;
   const final = scenario.expectations.finalConstraints;
@@ -69,6 +86,21 @@ export function validateDecisionScenario(scenario: DecisionScenario): DecisionSc
       `${scenario.id}:fixture_destination_mismatch`);
     assert(Object.keys(fixture.destinationCenters ?? {}).some((city) =>
       city.includes(destination) || destination.includes(city)), `${scenario.id}:destination_center_missing`);
+  }
+
+  const hardDietaryRequirements = hard.dietaryRestrictions ?? [];
+  if (scenario.expectations.expectedFeasibility === "feasible" && hardDietaryRequirements.length > 0) {
+    const hasSupportedRestaurant = fixture.restaurants.some(restaurant =>
+      (!destination || restaurant.location.city.includes(destination) || destination.includes(restaurant.location.city))
+      && (hardMax === undefined || roundKm(haversineKm(
+        destination
+          ? Object.entries(fixture.destinationCenters ?? {}).find(([city]) =>
+              city.includes(destination) || destination.includes(city))?.[1] ?? scenario.environment.location.location
+          : scenario.environment.location.location,
+        restaurant.location,
+      )) <= hardMax)
+      && evaluateRestaurantDietaryCompatibility(restaurant, hardDietaryRequirements).passed);
+    assert(hasSupportedRestaurant, `${scenario.id}:BENCHMARK_FIXTURE_DIETARY_GAP`);
   }
 
   if (scenario.expectations.expectedFeasibility === "infeasible") {

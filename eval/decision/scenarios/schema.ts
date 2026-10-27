@@ -1,4 +1,5 @@
 import type { ResolvedLocation } from "../../../spec/location.js";
+import type { DietaryRequirement } from "../../../spec/dietary.js";
 import type {
   Attraction,
   BreakPlace,
@@ -7,7 +8,7 @@ import type {
 } from "../../../spec/types.js";
 import type { GeoLocation } from "../../../spec/types.js";
 
-export const DECISION_BENCHMARK_VERSION = "decision-v3.0" as const;
+export const DECISION_BENCHMARK_VERSION = "decision-v3.1" as const;
 
 export interface DecisionTurn {
   user: string;
@@ -30,7 +31,7 @@ export interface ConstraintExpectationProjection {
   leadRole?: LeadRole;
   budget?: "low" | "medium" | "high";
   preferredCuisine?: string[];
-  dietaryRestrictions?: string[];
+  dietaryRestrictions?: DietaryRequirement[];
   hardMaxKm?: number;
   preferredMaxKm?: number;
 }
@@ -38,13 +39,13 @@ export interface ConstraintExpectationProjection {
 export interface DecisionHardConstraintExpectation {
   destinationCity?: string;
   maxDistanceKm?: number;
-  dietaryRestrictions?: string[];
+  dietaryRestrictions?: DietaryRequirement[];
 }
 
 export interface DecisionPreferenceExpectation {
   preferredMaxKm?: number;
   preferredCuisine?: string[];
-  dietaryRestrictions?: string[];
+  dietaryRestrictions?: DietaryRequirement[];
   leadRole?: LeadRole;
   desiredTags?: string[];
 }
@@ -81,3 +82,6 @@ export interface DecisionScenario {
   expectations: DecisionExpectations;
   tags: string[];
 }
+
+/** The agent-visible portion of a benchmark scenario; deliberately excludes ground truth. */
+export type DecisionScenarioExecutionInput = Omit<DecisionScenario, "expectations">;
